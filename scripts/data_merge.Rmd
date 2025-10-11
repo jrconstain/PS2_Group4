@@ -61,7 +61,13 @@ df_train_hogares %>% anti_join(df_train_hogares, by = "id")  # puede haber hogar
 ```
 
 ```{r}
+# Eliminar columnas duplicadas del dataframe combinado (excepto 'id')
+duplicados <- intersect(names(df_train_personas), names(df_train_hogares))
+duplicados <- setdiff(duplicados, "id")  # No eliminar 'id'
 
+# Eliminar columnas duplicadas del dataframe combinado
+df_train_hogares <- df_train_hogares %>% select(-all_of(duplicados))
+df_test_hogares <- df_test_hogares %>% select(-all_of(duplicados))
 
 
 # Merge de train_hogares con train_personas
@@ -72,15 +78,17 @@ df_train <- df_train_personas %>%
 df_test <- df_test_personas %>%
   left_join(df_test_hogares, by = "id")
 
+# Obtener nombres de columnas comunes entre df_train y df_test
+columnas_comunes <- intersect(names(df_train), names(df_test))
+
+# Filtrar df_train para conservar solo esas columnas
+df_train <- df_train %>% select(all_of(columnas_comunes))
+
 # Verificar estructura de los nuevos dataframes
 glimpse(df_train)
 glimpse(df_test)
 
 
 ```
-
-
-
-
 
 Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
