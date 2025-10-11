@@ -39,10 +39,10 @@ ruta2 <- here("stores", "train_personas.csv")
 df_train_personas <- read_csv(ruta2)
 
 ruta3 <- here("stores", "test_personas.csv")
-df_test_personas <- read_csv(ruta2)
+df_test_personas <- read_csv(ruta3)
 
 ruta4 <- here("stores", "test_hogares.csv")
-df_test_hogares <- read_csv(ruta2)
+df_test_hogares <- read_csv(ruta4)
 
 ```
 
@@ -55,12 +55,29 @@ df_train_personas %>% count(id) %>% arrange(desc(n)) #mira la distribución pers
 
 ```{r}
 # ¿Hay ID en personas que no existan en hogares (o viceversa)?
-df_train_personas %>% anti_join(df_train_personas, by = "id")  # debería ser 0
+df_train_personas %>% anti_join(df_train_hogares, by = "id")  # debería ser 0
 df_train_hogares %>% anti_join(df_train_hogares, by = "id")  # puede haber hogares sin personas?
 
 ```
 
+```{r}
 
+
+
+# Merge de train_hogares con train_personas
+df_train <- df_train_personas %>%
+  left_join(df_train_hogares, by = "id")
+
+# Merge de test_hogares con test_personas
+df_test <- df_test_personas %>%
+  left_join(df_test_hogares, by = "id")
+
+# Verificar estructura de los nuevos dataframes
+glimpse(df_train)
+glimpse(df_test)
+
+
+```
 
 
 
