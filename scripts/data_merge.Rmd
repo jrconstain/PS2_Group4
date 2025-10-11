@@ -36,9 +36,33 @@ ruta1 <- here("stores", "train_hogares.csv")
 df_train_hogares <- read_csv(ruta1)
 
 ruta2 <- here("stores", "train_personas.csv")
-df_train_hogares <- read_csv(ruta2)
+df_train_personas <- read_csv(ruta2)
+
+ruta3 <- here("stores", "test_personas.csv")
+df_test_personas <- read_csv(ruta2)
+
+ruta4 <- here("stores", "test_hogares.csv")
+df_test_hogares <- read_csv(ruta2)
 
 ```
+
+```{r}
+#    - En HOGARES debe ser único (1 fila por hogar)
+#    - En PERSONAS puede repetirse (muchos individuos por hogar)
+df_train_hogares %>% count(id) %>% filter(n > 1)    #debería devolver 0 filas
+df_train_personas %>% count(id) %>% arrange(desc(n)) #mira la distribución personas/hogar
+```
+
+```{r}
+# ¿Hay ID en personas que no existan en hogares (o viceversa)?
+df_train_personas %>% anti_join(df_train_personas, by = "id")  # debería ser 0
+df_train_hogares %>% anti_join(df_train_hogares, by = "id")  # puede haber hogares sin personas?
+
+```
+
+
+
+
 
 
 
