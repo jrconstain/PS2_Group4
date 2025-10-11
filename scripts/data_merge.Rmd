@@ -1,0 +1,45 @@
+---
+title: "data_merge"
+author: "G4"
+date: "2025-10-11"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(pacman)
+
+p_load(rio, # Import/export data.
+       tidyverse, # Tidy-data.
+       stargazer, # Descriptive statistics.
+       gt, # Descriptive statistics.
+       gtsummary,
+       caret, # For predictive model assessment.
+       gridExtra, # Arrange plots.
+       skimr, # Summarize data.
+       here, #for file searching
+       readr, #for opening files
+       ggplot2,
+       boot,
+       scales,
+       car,
+       dplyr,
+       tidyr
+       )
+```
+
+```{r}
+ruta1 <- here("stores", "train_hogares.csv")
+df_train_hogares <- read_csv(ruta1)
+
+ruta2 <- here("stores", "train_personas.csv")
+df_train_hogares <- read_csv(ruta2)
+
+```
+
+
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
