@@ -84,11 +84,74 @@ columnas_comunes <- intersect(names(df_train), names(df_test))
 # Filtrar df_train para conservar solo esas columnas
 df_train <- df_train %>% select(all_of(columnas_comunes))
 
-# Verificar estructura de los nuevos dataframes
-glimpse(df_train)
-glimpse(df_test)
+```
+
+```{r}
+library(labelled)
+
+# 1) Lee el diccionario (debe tener, al menos: var, etiqueta_larga)
+#    Ajusta la ruta si lo guardaste en otra carpeta.
+
+ruta5 <- here("stores", "diccionario_nombres.csv")
+codebook <- read_csv(ruta5)
+
+# (opcional) asegurar codificación en UTF-8 por si ves tildes raras
+codebook <- codebook %>%
+  mutate(
+    etiqueta_larga = enc2utf8(etiqueta_larga)
+  )
+
+# Cambiarle los nombres a las variables y ponerles etiquetas
+# Vector "var original" -> "nombre_corto"
+rename_vec <- setNames(codebook$nombre_corto, codebook$var)
+
+# Usa solo las variables que EXISTEN en df_train
+rename_vec_use <- rename_vec[names(rename_vec) %in% names(df_train)]
+
+# Avisos de columnas del codebook que no están en tu df
+faltan_en_df <- setdiff(names(rename_vec), names(df_train))
+if (length(faltan_en_df)) message("No están en df_train: ", paste(faltan_en_df, collapse=", "))
+
+# Construir el mapeo en la dirección correcta para rename(): nuevo = viejo
+#    Esto produce un named vector tipo c("Orden") con nombre "llave_persona"
+rename_spec <- setNames(names(rename_vec_use), unname(rename_vec_use))
+
+# Resolver problemas
+if (any(duplicated(names(rename_spec)))) {
+  new_names <- make.unique(names(rename_spec), sep = "_dup")
+  names(rename_spec) <- new_names
+  message("Se ajustaron nombres destino duplicados con sufijo _dup.")
+}
+
+# Renombrar manteniendo copia
+df_train_orig <- df_train
+df_train_tag <- df_train %>% rename(!!!rename_spec)
+
+# Reaplicar etiquetas al NUEVO nombre
+lab_map <- codebook %>%
+  filter(var %in% names(rename_vec_use)) %>%
+  mutate(nombre_dest = rename_vec_use[var]) %>%
+  select(nombre_dest, etiqueta_larga)
+
+lab_vec <- setNames(lab_map$etiqueta_larga, lab_map$nombre_dest)
+keep <- intersect(names(df_train_tag), names(lab_vec))
+df_train_tag <- set_variable_labels(df_train_tag, .labels = lab_vec[keep])
+
+# Pruebas
+names(df_train_tag)[1:20]
+look_for(df_train_tag) %>% print(n = 60)
 
 
 ```
+
+```{r}
+
+```
+
+
+
+
+
+
 
 Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
