@@ -27,7 +27,8 @@ p_load(rio, # Import/export data.
        scales,
        car,
        dplyr,
-       tidyr
+       tidyr,
+       plurrr
        )
 ```
 
@@ -47,6 +48,62 @@ df_test_hogares <- read_csv(ruta4)
 ```
 
 ```{r}
+df_train_personas %>% 
+  count(id, sort = TRUE) %>% 
+  filter(n > 1)
+any(duplicated(df_train_personas$id))
+
+```
+
+```{r}
+id_objetivo <- "84731a4167a272bc2ce03162"
+
+filas_id <- df_train_personas %>% 
+  filter(id == id_objetivo)
+
+nrow(filas_id)
+as.data.frame(filas_id)
+
+```
+
+```{r}
+# TRAIN
+
+# IDs de personas que SÍ están en hogares
+ids_personas_en_hogares <- df_train_personas %>%
+  semi_join(df_train_hogares, by = "id") %>%
+  distinct(id)
+
+ids_personas_en_hogares
+nrow(ids_personas_en_hogares)
+
+```
+
+```{r}
+# TEST
+# IDs de personas que SÍ están en hogares
+ids_personas_en_hogares_test <- df_test_personas %>%
+  semi_join(df_test_hogares, by = "id") %>%
+  distinct(id)
+
+ids_personas_en_hogares_test
+nrow(ids_personas_en_hogares_test)
+
+```
+
+```{r}
+str(df_test_hogares)
+```
+
+```{r}
+df_test_personas %>% 
+  count(id, sort = TRUE) %>% 
+  filter(n > 1)
+any(duplicated(df_test_personas$id))
+```
+
+
+```{r}
 #    - En HOGARES debe ser único (1 fila por hogar)
 #    - En PERSONAS puede repetirse (muchos individuos por hogar)
 df_train_hogares %>% count(id) %>% filter(n > 1)    #debería devolver 0 filas
@@ -60,31 +117,6 @@ df_train_hogares %>% anti_join(df_train_hogares, by = "id")  # puede haber hogar
 
 ```
 
-```{r}
-# Eliminar columnas duplicadas del dataframe combinado (excepto 'id')
-duplicados <- intersect(names(df_train_personas), names(df_train_hogares))
-duplicados <- setdiff(duplicados, "id")  # No eliminar 'id'
-
-# Eliminar columnas duplicadas del dataframe combinado
-df_train_hogares <- df_train_hogares %>% select(-all_of(duplicados))
-df_test_hogares <- df_test_hogares %>% select(-all_of(duplicados))
-
-
-# Merge de train_hogares con train_personas
-df_train <- df_train_personas %>%
-  left_join(df_train_hogares, by = "id")
-
-# Merge de test_hogares con test_personas
-df_test <- df_test_personas %>%
-  left_join(df_test_hogares, by = "id")
-
-# Obtener nombres de columnas comunes entre df_train y df_test
-columnas_comunes <- intersect(names(df_train), names(df_test))
-
-# Filtrar df_train para conservar solo esas columnas
-df_train <- df_train %>% select(all_of(columnas_comunes))
-
-```
 
 ```{r}
 library(labelled)
