@@ -212,13 +212,14 @@ df_test_personas  <- add_experience(df_test_personas)
 ```
 
 ```{r}
+# Manage NA's on labor indicators
 fill_labor_nas <- function(df) {
   vars <- c("Pet", "Oc", "Des", "Ina")
   df %>%
     mutate(across(all_of(vars), ~ as.integer(replace(., is.na(.), 0L))))
 }
 
-# Aplicar
+# Apply
 df_train_personas <- fill_labor_nas(df_train_personas)
 df_test_personas  <- fill_labor_nas(df_test_personas)
 
@@ -227,26 +228,49 @@ df_test_personas  <- fill_labor_nas(df_test_personas)
 # Agreggate variables to household level
 
 ```{r}
-# Function to compute a household-level feature:
-# mean years of education among the occupied persons in each household
-agg_mean_edu_occupied <- function(df_personas) {
+
+# Function to aggregate 5 household-level features from person-level data
+agg_personas_to_hogares <- function(df_personas) {
   df_personas %>%
     dplyr::group_by(id) %>%
     dplyr::summarise(
+      # 1) Promedio de años de educación entre ocupados (Oc==1)
       mean_edu_occ = mean(edu_years[Oc == 1], na.rm = TRUE),
+
+      # 2) Proporción: Ocupados / número de personas en el hogar
+      n_personas   = dplyr::n(),
+      n_occ        = sum(Oc == 1, na.rm = TRUE),
+      prop_occ_nper = n_occ / n_personas,
+
+      # 3) Proporción: Ocupados / total # PET (PET==1)
+      n_pet         = sum(Pet == 1, na.rm = TRUE),
+      prop_occ_pet  = n_occ / n_pet,
+
+      # 4) Máx. nivel educativo (P6210) del jefe (P6050==1)
+      # (si hay más de un jefe marcado, toma el máximo)
+      jefe_max_edu = ifelse(any(P6050 == 1), max(P6210[P6050 == 1], na.rm = TRUE), NA_real_),
+
+      # 5) Promedio horas de trabajo por semana (P6800) entre Oc==1
+      prom_horas_occ = mean(P6800[Oc == 1], na.rm = TRUE),
+
       .groups = "drop"
-    )
+    ) %>%
+    # (opcional) deja solo las 5 finales + conteos si quieres inspeccionar
+    dplyr::select(id, mean_edu_occ, prop_occ_nper, prop_occ_pet, jefe_max_edu, prom_horas_occ)
 }
 
 # Aplicar al TRAIN: personas -> hogares
-train_mean_edu_occ <- agg_mean_edu_occupied(df_train_personas)
-
+train_agg5 <- agg_personas_to_hogares(df_train_personas)
 df_train_hogares <- df_train_hogares %>%
-  dplyr::left_join(train_mean_edu_occ, by = "id")
+  dplyr::left_join(train_agg5, by = "id")
 
 # Aplicar al TEST: personas -> hogares
-test_mean_edu_occ <- agg_mean_edu_occupied(df_test_personas)
-
+test_agg5 <- agg_personas_to_hogares(df_test_personas)
 df_test_hogares <- df_test_hogares %>%
-  dplyr::left_join(test_mean_edu_occ, by = "id")
+  dplyr::left_join(test_agg5, by = "id")
+
+```
+
+```{r}
+
 ```
