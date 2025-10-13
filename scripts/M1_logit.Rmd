@@ -47,8 +47,6 @@ df_test_hogares <- read_csv(ruta4)
 ```
 
 ```{r}
-
-
 set.seed(1011)
 
 # variables a usar
@@ -143,11 +141,7 @@ readr::write_csv(kaggle_sub, "LOGIT_treshold_05.csv")
 head(kaggle_sub)
 ```
 
-mean_edu_occ 
-prop_occ_nper
-prop_occ_pet
-jefe_max_edu
-prom_horas_occ
+mean_edu_occ prop_occ_nper prop_occ_pet jefe_max_edu prom_horas_occ
 
 ```{r}
 # modelo 2
@@ -244,6 +238,147 @@ kaggle_sub <- predicciones_hogares %>%
 write_csv(kaggle_sub,  here::here("stores", "LOGIT_th_050_V2.csv"))
 ```
 
+```{r}
+# modelo 3
 
+ruta7 <- here("stores", "train_hogares_enriquecido_2.csv")
+train_hogares_enriquecido <- read_csv(ruta7)
+
+ruta8 <- here("stores", "test_hogares_enriquecido_2.csv")
+test_hogares_enriquecido <- read_csv(ruta8)
+
+```
+
+```{r}
+# ============================================================
+# LOGIT con 15 variables + interacciones y potencias
+# ============================================================
+
+set.seed(2050)
+
+# Variables base (las nuevas + básicas de hogar)
+vars <- c(
+  "P5000","P5010","P5090","P5100","P5130","P5140",
+  "Nper","Npersug","Depto","Lp",
+  # variables de personas a nivel hogar
+  "mean_edu_occ","prop_occ_nper","prop_occ_pet","jefe_max_edu","horas_prom_occ",
+  "sexo_jefe","antig_jefe","antig_prom_occ","edu_prom_occ","prop_des",
+  "edad_jefe","edad_prom_occ","prestaciones","tam_emp_jefe","tam_emp_prom_occ",
+  "cotiza_pens_jefe","pos_ocup_jefe"
+)
+
+# Limpia duplicados después de hacer todos los joins
+train_hogares_enriquecido <- train_hogares_enriquecido %>%
+  select(-ends_with(".x"), -ends_with(".y")) %>%
+  distinct(id, .keep_all = TRUE)
+
+test_hogares_enriquecido <- test_hogares_enriquecido %>%
+  select(-ends_with(".x"), -ends_with(".y")) %>%
+  distinct(id, .keep_all = TRUE)
+
+# Mutar
+train_hogares_enriquecido <- train_hogares_enriquecido %>%
+  mutate(
+    edad_jefe2       = edad_jefe^2,
+    edad_prom_occ2   = edad_prom_occ^2,
+    sexo_desocup     = sexo_jefe * prop_des,
+    edu_occ_lp       = mean_edu_occ * Lp,
+    horasxedu_occ    = horas_prom_occ * mean_edu_occ   # ← aquí el cambio
+  )
+
+test_hogares_enriquecido <- test_hogares_enriquecido %>%
+  mutate(
+    edad_jefe2       = edad_jefe^2,
+    edad_prom_occ2   = edad_prom_occ^2,
+    sexo_desocup     = sexo_jefe * prop_des,
+    edu_occ_lp       = mean_edu_occ * Lp,
+    horasxedu_occ    = horas_prom_occ * mean_edu_occ
+  )
+
+
+# Añadir nuevas al vector de variables
+vars <- c(vars, "edad_jefe2", "edad_prom_occ2", "sexo_desocup", "edu_occ_lp", "horasxedu_occ")
+
+# ============================================================
+# Armar train/test
+# ============================================================
+
+train_use <- train_hogares_enriquecido %>%
+  select(Pobre, all_of(vars)) %>%
+  mutate(Pobre = factor(Pobre, levels = c(0,1), labels = c("no_pobre","pobre")))
+
+test_final <- test_hogares_enriquecido %>%
+  select(all_of(vars))
+
+# Categóricas (igual que antes)
+cat_vars <- c("Depto","P5090","pos_ocup_jefe","cotiza_pens_jefe")
+num_vars <- setdiff(vars, cat_vars)
+
+train_use[cat_vars]  <- lapply(train_use[cat_vars],  factor)
+test_final[cat_vars] <- lapply(test_final[cat_vars], as.character)
+
+# ============================================================
+# IMPUTACIÓN
+# ============================================================
+
+# Numéricas -> mediana
+for (v in num_vars) {
+  med <- median(train_use[[v]], na.rm = TRUE)
+  train_use[[v]][is.na(train_use[[v]])] <- med
+  test_final[[v]][is.na(test_final[[v]])] <- med
+}
+
+# Categóricas -> moda
+for (v in cat_vars) {
+  mode_v <- names(which.max(table(train_use[[v]])))
+  train_use[[v]][is.na(train_use[[v]])] <- mode_v
+  tmp <- test_final[[v]]
+  tmp[is.na(tmp) | !(tmp %in% levels(train_use[[v]]))] <- mode_v
+  test_final[[v]] <- factor(tmp, levels = levels(train_use[[v]]))
+}
+
+train_use <- droplevels(train_use)
+
+# ============================================================
+# Modelo LOGIT
+# ============================================================
+
+ctrl <- trainControl(method = "cv", number = 5, classProbs = TRUE, savePredictions = TRUE)
+form <- as.formula(paste("Pobre ~", paste(vars, collapse = " + ")))
+
+set.seed(2050)
+modelo_logit3 <- train(
+  form, data = train_use,
+  method = "glm",
+  family = "binomial",
+  trControl = ctrl,
+  na.action = na.omit
+)
+
+# ============================================================
+# Predicciones
+# ============================================================
+
+pred_prob <- predict(modelo_logit3, newdata = test_final, type = "prob")
+prob_1 <- pred_prob[,"pobre"]
+pred_01 <- as.integer(prob_1 >= 0.5)
+
+id_out <- if ("id" %in% names(test_hogares_enriquecido)) test_hogares_enriquecido$id else seq_len(nrow(test_hogares_enriquecido))
+
+predicciones_hogares <- tibble(
+  id = id_out,
+  prob_pobre_1 = prob_1,
+  pobre_pred   = pred_01
+)
+
+kaggle_sub <- predicciones_hogares %>%
+  transmute(
+    id    = as.character(id),
+    pobre = as.integer(pobre_pred)
+  )
+
+# Guardar
+write_csv(kaggle_sub, here::here("stores", "LOGIT_th_050_V3.csv"))
+```
 
 Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.

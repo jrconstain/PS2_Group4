@@ -272,5 +272,128 @@ df_test_hogares <- df_test_hogares %>%
 ```
 
 ```{r}
+# Function: agrega 14 variables a nivel hogar a partir del nivel personas
+agg_personas_to_hogares_plus <- function(df_personas) {
+  df_personas %>%
+    group_by(id) %>%
+    summarise(
+      # Bases para proporciones
+      n_personas     = n(),
+      n_occ          = sum(Oc == 1, na.rm = TRUE),
+      n_pet          = sum(Pet == 1, na.rm = TRUE),
+
+      # 1) Promedio de años de educación entre ocupados (Oc==1)
+      mean_edu_occ   = mean(edu_years[Oc == 1], na.rm = TRUE),
+
+      # 2) Proporción: Ocupados / número de personas en el hogar
+      prop_occ_nper  = n_occ / n_personas,
+
+      # 3) Proporción: Ocupados / total # PET (PET==1)
+      prop_occ_pet   = n_occ / n_pet,
+
+      # 4) Máx nivel educativo del jefe del hogar (P6050==1)
+      jefe_max_edu   = max(P6210[P6050 == 1], na.rm = TRUE),
+
+      # 5) Años de edu promedio de los Oc==1
+      edu_prom_occ   = mean(edu_years[Oc == 1], na.rm = TRUE),
+
+      # 6) Proporción de los Des (= 1 - Prop Oc/nper)
+      prop_des       = 1 - (n_occ / n_personas),
+
+      # 7) Edad del Jefe del hogar
+      edad_jefe      = first(P6040[P6050 == 1]),
+
+      # 8) Edad promedio de los que trabajan (Oc==1)
+      edad_prom_occ  = mean(P6040[Oc == 1], na.rm = TRUE),
+
+      # 9) prestaciones = 1 si cualquiera de los ítems es "sí" (==1)
+      prestaciones   = as.integer(
+        any(P6510 == 1, na.rm = TRUE) |
+        any(P6545 == 1, na.rm = TRUE) |
+        any(P6580 == 1, na.rm = TRUE) |
+        any(P6630s1 == 1, na.rm = TRUE) |
+        any(P6630s2 == 1, na.rm = TRUE) |
+        any(P6630s3 == 1, na.rm = TRUE) |
+        any(P6630s4 == 1, na.rm = TRUE) |
+        any(P6630s6 == 1, na.rm = TRUE)
+      ),
+
+      # 10) P6800 Horas usuales por semana en el trabajo principal (promedio entre Oc==1)
+      horas_prom_occ = mean(P6800[Oc == 1], na.rm = TRUE),
+
+      # 11) P6870 Tamaño empresa/negocio del Jefe
+      tam_emp_jefe   = first(P6870[P6050 == 1]),
+
+      # 12) P6870 Tamaño empresa/negocio promedio entre Oc==1
+      tam_emp_prom_occ = mean(P6870[Oc == 1], na.rm = TRUE),
+
+      # 13) P6920 ¿Cotiza a pensiones? del Jefe
+      cotiza_pens_jefe = first(P6920[P6050 == 1]),
+
+      # 14) P6430 Posición ocupacional del Jefe
+      pos_ocup_jefe  = first(P6430[P6050 == 1]),
+      
+      # 15) Promedio horas de trabajo por semana (P6800) entre Oc==1
+      prom_horas_occ = mean(P6800[Oc == 1], na.rm = TRUE),
+
+      # 2 extras útiles que pediste arriba:
+      # Sexo del jefe (P6020) y Antigüedad P6426 (jefe y promedio Oc==1)
+      sexo_jefe      = first(P6020[P6050 == 1]),
+      antig_jefe     = first(P6426[P6050 == 1]),
+      antig_prom_occ = mean(P6426[Oc == 1], na.rm = TRUE),
+
+      .groups = "drop"
+    ) %>%
+    # Deja solo las columnas finales útiles (incluye bases si quieres auditarlas)
+    select(
+      id,
+      mean_edu_occ, prop_occ_nper, prop_occ_pet,
+      jefe_max_edu, edu_prom_occ, prop_des,
+      edad_jefe, edad_prom_occ, prestaciones,
+      horas_prom_occ, tam_emp_jefe, tam_emp_prom_occ,
+      cotiza_pens_jefe, pos_ocup_jefe,
+      sexo_jefe, antig_jefe, antig_prom_occ, prom_horas_occ
+    )
+}
+
+# Aplicar al TRAIN: personas -> hogares
+train_agg <- agg_personas_to_hogares_plus(df_train_personas)
+df_train_hogares <- df_train_hogares %>% left_join(train_agg, by = "id")
+
+# Aplicar al TEST: personas -> hogares
+test_agg <- agg_personas_to_hogares_plus(df_test_personas)
+df_test_hogares  <- df_test_hogares  %>% left_join(test_agg,  by = "id")
+```
+
+```{r}
+# Guardar datasets enriquecidos en "stores/"
+write_csv(df_train_hogares, here::here("stores", "train_hogares_enriquecido_2.csv"))
+write_csv(df_test_hogares,  here::here("stores", "test_hogares_enriquecido_2.csv"))
+```
+
+
+# Cinta
+
+La fórmula determinística de lo que queremos calcular es $Pobre=I(ingreso<Lp)$. Como Lp está dado, podemos incluirla en la regresión y capturar toda su información, por lo que en parte se vuelve un juego de predecir e ingreso.
+
+```{r}
+# Pobre determinado por Ingpcug < Lp
+table(df_train_hogares$Pobre, df_train_hogares$Ingpcug < df_train_hogares$Lp)
+
+# Ingpcup se calcula con Igtotugarr?
+table(round(df_train_hogares$Ingtotugarr / df_train_hogares$Npersug, 2) == round(df_train_hogares$Ingpcug, 2))
+
+# Cuantos pobres hay? 
+cat("No Pobres | Pobres")
+prop.table(table(df_train_hogares$Pobre))
+```
+
+Ya que comprobamos que la pobreza se calcula según el ingreso con arriendo imputado, la variable de tenencia debe estar muy relacionada con la pobreza. 
+
+```{r}
+table(df_train_hogares$P5090, df_train_hogares$Pobre)
+prop.table(table(df_train_hogares$P5090, df_train_hogares$Pobre), 1)
 
 ```
+
+
