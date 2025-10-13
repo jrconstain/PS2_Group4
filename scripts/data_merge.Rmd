@@ -33,6 +33,8 @@ p_load(rio, # Import/export data.
 ```
 
 ```{r}
+# Cargar archivos de datos
+
 ruta1 <- here("stores", "train_hogares.csv")
 df_train_hogares <- read_csv(ruta1)
 
@@ -48,15 +50,15 @@ df_test_hogares <- read_csv(ruta4)
 ```
 
 ```{r}
+# Generar conteo de personas en cada hogar
 df_train_personas %>% 
   count(id, sort = TRUE) %>% 
   filter(n > 1)
-any(duplicated(df_train_personas$id))
-
 ```
 
 ```{r}
-id_objetivo <- "84731a4167a272bc2ce03162"
+# Revisamos hogar con 28 personas
+id_objetivo <- "cf7491d7f2cc9c216bd009e7"
 
 filas_id <- df_train_personas %>% 
   filter(id == id_objetivo)
@@ -67,7 +69,7 @@ as.data.frame(filas_id)
 ```
 
 ```{r}
-# TRAIN
+# Exploramos TRAIN
 
 # IDs de personas que SÍ están en hogares
 ids_personas_en_hogares <- df_train_personas %>%
@@ -176,14 +178,75 @@ look_for(df_train_tag) %>% print(n = 60)
 
 ```
 
+# Create new variables at individual level
+
 ```{r}
+
+# Function to create years of education
+add_edu_years <- function(df) {
+  df$edu_years <- ifelse(
+    df$P6210 %in% c(1, 2, 9), 0, # None, Preschool, Unknown → 0
+    ifelse(
+      df$P6210 %in% c(3, 4, 5), df$P6210s1, # Primary or Secondary → as is
+      ifelse(df$P6210 == 6, df$P6210s1 + 11, NA_real_) # Tertiary → add 11
+    )
+  )
+  df
+}
+
+# Apply function to Train and Test
+df_train_personas <- add_edu_years(df_train_personas)
+df_test_personas  <- add_edu_years(df_test_personas)
+
+# Function to create years of experience (Mincer-style proxy)
+# exp = age - edu_years - 6
+add_experience <- function(df) {
+  df$exp <- df$P6040 - df$edu_years - 6
+  df
+}
+
+# Apply function to Train and Test
+df_train_personas <- add_experience(df_train_personas)
+df_test_personas  <- add_experience(df_test_personas)
 
 ```
 
+```{r}
+fill_labor_nas <- function(df) {
+  vars <- c("Pet", "Oc", "Des", "Ina")
+  df %>%
+    mutate(across(all_of(vars), ~ as.integer(replace(., is.na(.), 0L))))
+}
 
+# Aplicar
+df_train_personas <- fill_labor_nas(df_train_personas)
+df_test_personas  <- fill_labor_nas(df_test_personas)
 
+```
 
+# Agreggate variables to household level
 
+```{r}
+# Function to compute a household-level feature:
+# mean years of education among the occupied persons in each household
+agg_mean_edu_occupied <- function(df_personas) {
+  df_personas %>%
+    dplyr::group_by(id) %>%
+    dplyr::summarise(
+      mean_edu_occ = mean(edu_years[Oc == 1], na.rm = TRUE),
+      .groups = "drop"
+    )
+}
 
+# Aplicar al TRAIN: personas -> hogares
+train_mean_edu_occ <- agg_mean_edu_occupied(df_train_personas)
 
-Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+df_train_hogares <- df_train_hogares %>%
+  dplyr::left_join(train_mean_edu_occ, by = "id")
+
+# Aplicar al TEST: personas -> hogares
+test_mean_edu_occ <- agg_mean_edu_occupied(df_test_personas)
+
+df_test_hogares <- df_test_hogares %>%
+  dplyr::left_join(test_mean_edu_occ, by = "id")
+```
