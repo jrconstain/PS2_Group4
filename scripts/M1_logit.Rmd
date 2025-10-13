@@ -1,0 +1,152 @@
+---
+title: "logit"
+author: "G4"
+date: "2025-10-12"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(pacman)
+
+p_load(rio, # Import/export data.
+       tidyverse, # Tidy-data.
+       stargazer, # Descriptive statistics.
+       gt, # Descriptive statistics.
+       gtsummary,
+       caret, # For predictive model assessment.
+       gridExtra, # Arrange plots.
+       skimr, # Summarize data.
+       here, #for file searching
+       readr, #for opening files
+       ggplot2,
+       boot,
+       scales,
+       car,
+       dplyr,
+       tidyr,
+       plurrr
+       )
+```
+
+```{r}
+ruta1 <- here("stores", "train_hogares.csv")
+df_train_hogares <- read_csv(ruta1)
+
+ruta2 <- here("stores", "train_personas.csv")
+df_train_personas <- read_csv(ruta2)
+
+ruta3 <- here("stores", "test_personas.csv")
+df_test_personas <- read_csv(ruta3)
+
+ruta4 <- here("stores", "test_hogares.csv")
+df_test_hogares <- read_csv(ruta4)
+```
+
+```{r}
+
+
+set.seed(1011)
+
+# variables a usar
+vars <- c("P5000","P5010","P5090","P5100","P5130","P5140",
+          "Nper","Npersug","Depto","Lp")
+
+# Armar train/test
+train_use <- df_train_hogares %>%
+  select(Pobre, all_of(vars)) %>%
+  mutate(Pobre = factor(Pobre, levels = c(0,1), labels = c("no_pobre","pobre")))
+
+test_final <- df_test_hogares %>%
+  select(all_of(vars))
+
+# Convertir factores
+if ("Depto" %in% vars) {
+  train_use$Depto <- factor(train_use$Depto)
+  test_final$Depto <- as.character(test_final$Depto)
+}
+if ("P5090" %in% vars) {
+  train_use$P5090 <- factor(train_use$P5090)
+  test_final$P5090 <- as.character(test_final$P5090)
+}
+
+# IMPUTACIÓN
+# Numéricas: mediana del train
+num_vars <- vars[!(vars %in% c("Depto","P5090"))]
+for (v in num_vars) {
+  med <- median(train_use[[v]], na.rm = TRUE)
+  train_use[[v]][is.na(train_use[[v]])] <- med
+  test_final[[v]][is.na(test_final[[v]])] <- med
+}
+
+# Categóricas: moda del train
+if ("Depto" %in% vars) {
+  mode_depto <- names(which.max(table(train_use$Depto)))
+  train_use$Depto[is.na(train_use$Depto)] <- mode_depto
+  test_depto <- test_final$Depto
+  test_depto[is.na(test_depto) | !(test_depto %in% levels(train_use$Depto))] <- mode_depto
+  test_final$Depto <- factor(test_depto, levels = levels(train_use$Depto))
+}
+if ("P5090" %in% vars) {
+  mode_p5090 <- names(which.max(table(train_use$P5090)))
+  train_use$P5090[is.na(train_use$P5090)] <- mode_p5090
+  test_p5090 <- test_final$P5090
+  test_p5090[is.na(test_p5090) | !(test_p5090 %in% levels(train_use$P5090))] <- mode_p5090
+  test_final$P5090 <- factor(test_p5090, levels = levels(train_use$P5090))
+}
+
+# control y modelo
+ctrl <- trainControl(method = "cv", number = 5, classProbs = TRUE, savePredictions = TRUE)
+form <- as.formula(paste("Pobre ~", paste(vars, collapse = " + ")))
+
+set.seed(1410)
+modelo_logit <- train(
+  form, data = train_use,
+  method = "glm",
+  family = "binomial",
+  trControl = ctrl,
+  na.action = na.omit
+)
+
+# predicción
+pred_prob <- predict(modelo_logit, newdata = test_final, type = "prob")
+
+# Umbral
+th <- 0.5
+
+# Predicción binaria 0/1 usando la prob. de "pobre"
+prob_1 <- pred_prob[,"pobre"]
+pred_01 <- as.integer(prob_1 >= th)
+
+# Salida: id, probabilidad y predicción 0/1
+id_out <- if ("id" %in% names(df_test_hogares)) df_test_hogares$id else seq_len(nrow(df_test_hogares))
+
+predicciones_hogares <- tibble(
+  id = id_out,
+  prob_pobre_1 = prob_1,
+  pobre_pred   = pred_01
+)
+
+# Formato Kaggle
+kaggle_sub <- predicciones_hogares %>%
+  transmute(
+    id    = as.character(id),
+    pobre = as.integer(pobre_pred)
+  )
+
+# Ponle un nombre siguiendo la convención
+readr::write_csv(kaggle_sub, "LOGIT_treshold_05.csv")
+
+head(kaggle_sub)
+```
+
+
+
+
+
+
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
