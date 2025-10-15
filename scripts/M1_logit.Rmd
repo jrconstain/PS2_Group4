@@ -49,6 +49,8 @@ df_test_hogares <- read_csv(ruta4)
 ```
 
 ```{r}
+
+# modelo 1 (Logit con variables iniciales household)
 set.seed(1011)
 
 # variables a usar
@@ -146,7 +148,7 @@ head(kaggle_sub)
 mean_edu_occ prop_occ_nper prop_occ_pet jefe_max_edu prom_horas_occ
 
 ```{r}
-# modelo 2
+# modelo 2 (Logit con primer set de variables individuales agregadas)
 
 ruta5 <- here("stores", "train_hogares_enriquecido.csv")
 train_hogares_enriquecido <- read_csv(ruta5)
@@ -241,7 +243,7 @@ write_csv(kaggle_sub,  here::here("stores", "LOGIT_th_050_V2.csv"))
 ```
 
 ```{r}
-# modelo 3
+# modelo 3 (Logit con segundo set de variables individuales agregadas)
 
 ruta7 <- here("stores", "train_hogares_enriquecido_2.csv")
 train_hogares_enriquecido <- read_csv(ruta7)
@@ -387,6 +389,8 @@ Note that the `echo = FALSE` parameter was added to the code chunk to prevent pr
 
 
 ```{r}
+#Modelo 4 (Logit + EN)
+
 # ============================================================
 # Modelo Elastic Net
 # ============================================================
@@ -485,4 +489,136 @@ kaggle_sub <- predicciones_hogares %>%
 
 # Guardar
 write_csv(kaggle_sub, here::here("stores", nombre_archivo))
+```
+
+```{r}
+#Modelo 5 (Random Forest)
+
+ctrl <- trainControl(method = "cv", number = 5, classProbs = TRUE, summaryFunction = fiveStats, savePredictions = TRUE)
+
+
+set.seed(2050)  # Fijamos semilla para reproducibilidad
+
+p_load("ranger")
+tree_ranger_grid <-train (
+    Pobre ~ . ,  # Fórmula del modelo
+    data = train_use,  # Dataset de entrenamiento
+    method = "ranger",  # Usamos el motor ranger para Random Forests
+    trControl = ctrl,  # Especificamos los controles de entrenamiento
+    tuneGrid = expand.grid(   # Definimos la grilla de hiperparámetros a explorar
+        mtry = c(5,7,9),  # Número de predictores seleccionados al azar en cada división
+        splitrule = "gini",  # Regla de partición basada en la reducción de varianza (regresión)
+        min.node.size = c(30, 50)  # Tamaño mínimo de nodos terminales
+    ),
+    metric = "F",  # Optimiza la métrica de F
+    num.trees = 200
+)
+tree_ranger_grid
+
+
+test_RF<- test_final  %>% mutate(pobre_hat_ranger=predict(tree_ranger_grid,newdata = test_final, type = "raw"))
+probRF_1 <- ifelse (test_RF$pobre_hat_ranger=="no_pobre",0,1)
+
+
+# ✅ Usa la misma fuente de IDs que funcionó con el LOGIT
+id_out <- if ("id" %in% names(test_hogares_enriquecido)) {
+  test_hogares_enriquecido$id
+} else {
+  seq_len(nrow(test_hogares_enriquecido))
+}
+
+predicciones_hogaresRF <- tibble(
+  id = id_out,
+  pobre_pred   = probRF_1
+)
+
+# Mantener consistencia con nombres y formato
+best_mtry  <- tree_ranger_grid$bestTune$mtry
+best_min.node.size <- tree_ranger_grid$bestTune$min.node.size
+best_splitrule <- tree_ranger_grid$bestTune$splitrule
+
+nombre_archivoRF <- sprintf(
+  "RF_mtry_%s_min.node.size_%s_SR_%s.csv",
+  format(best_mtry, 3),
+  format(best_min.node.size, 2),
+  format(best_splitrule, 2)  # para que quede trazable el cutoff
+)
+
+kaggle_sub <- predicciones_hogaresRF %>%
+  transmute(
+    id    = as.character(id),
+    pobre = as.integer(pobre_pred)
+  )
+
+# Guardar
+write_csv(kaggle_sub, here::here("stores", nombre_archivoRF))
+
+
+
+```
+
+
+```{r}
+#Modelo 6 (Random Forest)
+ctrl <- trainControl(method = "cv", number = 10, classProbs = TRUE, summaryFunction = fiveStats, savePredictions = TRUE)
+
+
+set.seed(2050)  # Fijamos semilla para reproducibilidad
+
+p_load("ranger")
+tree_ranger_grid <-train (
+    Pobre ~ . ,  # Fórmula del modelo
+    data = train_use,  # Dataset de entrenamiento
+    method = "ranger",  # Usamos el motor ranger para Random Forests
+    trControl = ctrl,  # Especificamos los controles de entrenamiento
+    tuneGrid = expand.grid(   # Definimos la grilla de hiperparámetros a explorar
+        mtry = c(5,7,9),  # Número de predictores seleccionados al azar en cada división
+        splitrule = "gini",  # Regla de partición basada en la reducción de varianza (regresión)
+        min.node.size = c(15,30, 50)  # Tamaño mínimo de nodos terminales
+    ),
+    metric = "F",  # Optimiza la métrica de F
+    num.trees = 500
+)
+tree_ranger_grid
+
+
+test_RF<- test_final  %>% mutate(pobre_hat_ranger=predict(tree_ranger_grid,newdata = test_final, type = "raw"))
+probRF_1 <- ifelse (test_RF$pobre_hat_ranger=="no_pobre",0,1)
+
+
+# ✅ Usa la misma fuente de IDs que funcionó con el LOGIT
+id_out <- if ("id" %in% names(test_hogares_enriquecido)) {
+  test_hogares_enriquecido$id
+} else {
+  seq_len(nrow(test_hogares_enriquecido))
+}
+
+predicciones_hogaresRF <- tibble(
+  id = id_out,
+  pobre_pred   = probRF_1
+)
+
+# Mantener consistencia con nombres y formato
+best_mtry  <- tree_ranger_grid$bestTune$mtry
+best_min.node.size <- tree_ranger_grid$bestTune$min.node.size
+best_splitrule <- tree_ranger_grid$bestTune$splitrule
+
+nombre_archivoRF <- sprintf(
+  "RF_mtry_%s_min.node.size_%s_SR_%s.csv",
+  format(best_mtry, 3),
+  format(best_min.node.size, 2),
+  format(best_splitrule, 2)  # para que quede trazable el cutoff
+)
+
+kaggle_sub <- predicciones_hogaresRF %>%
+  transmute(
+    id    = as.character(id),
+    pobre = as.integer(pobre_pred)
+  )
+
+# Guardar
+write_csv(kaggle_sub, here::here("stores", nombre_archivoRF))
+
+
+
 ```
