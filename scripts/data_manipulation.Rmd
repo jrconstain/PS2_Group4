@@ -286,6 +286,21 @@ df_test_hogares  <- df_test_hogares  %>% left_join(test_agg,  by = "id")
 write_csv(df_train_hogares, here::here("stores", "train_hogares_enriquecido_2.csv"))
 write_csv(df_test_hogares,  here::here("stores", "test_hogares_enriquecido_2.csv"))
 ```
+
+
+```{r}
+
+#Desbalanceo
+ggplot(df_train_hogares,aes(x = Pobre, y = after_stat(count / sum(count)), fill = Pobre)) +
+  geom_bar() +
+  theme_minimal() +
+  scale_y_continuous(labels = scales::percent_format(), breaks = seq(0, 1, by = 0.05)) +  
+  scale_fill_manual(values = c("1" = "orange", "0"= "blue")) + 
+   labs(x = "", y = "%")  
+#Tenemos un fuerte desbalanceo de la categoria pobres en el training
+
+```
+
 # Cinta
 
 La fórmula determinística de lo que queremos calcular es $Pobre=I(ingreso<Lp)$. Como Lp está dado, podemos incluirla en la regresión y capturar toda su información, por lo que en parte se vuelve un juego de predecir e ingreso.
@@ -307,6 +322,9 @@ Ya que comprobamos que la pobreza se calcula según el ingreso con arriendo impu
 ```{r}
 table(df_train_hogares$P5090, df_train_hogares$Pobre)
 prop.table(table(df_train_hogares$P5090, df_train_hogares$Pobre), 1)
+
+
+
 
 ```
 
