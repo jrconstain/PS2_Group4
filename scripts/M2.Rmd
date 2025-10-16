@@ -29,7 +29,8 @@ p_load(rio, # Import/export data.
        dplyr,
        tidyr,
        MLmetrics, 
-       glmnet
+       glmnet,
+       pROC
        )
 ```
 
@@ -486,7 +487,251 @@ write_csv(kaggle_sub, here::here("stores", "CART_clasif_F1.csv"))
 
 ```
 
+```{r}
+# ==========================================================
+# RF (caret + ranger) — Tier S + Alternative Cutoffs (Precision–Recall)
+# - Labels: "pobre" (positivo) / "no_pobre" (negativo)
+# - CV 5-fold, metric = "F" (F1), splitrule = "gini"
+# - Imputación: mediana (num) / moda (factor) aprendidas en TRAIN
+# - Umbral óptimo con pROC::coords sobre OOF del MEJOR HP (no todos)
+# - Export: stores/RF_mtry_*_min.node.size_*_thr_*.csv  (id, pobre)
+# ==========================================================
 
+set.seed(123)
+
+# ----------------------------------------------------------
+# 0) Variables Tier S
+# ----------------------------------------------------------
+tierS <- c(
+  # Vivienda / densidad
+  "hacinamiento_alcoba","P5090",
+  # Gasto vivienda / costo de vida
+  "P5130","P5140","Lp",
+  # Región / costo de vida
+  "Dominio",
+  # Mercado laboral / capital humano
+  "prop_occ_nper","edu_prom_occ","jefe_max_edu",
+  "prestaciones","cotiza_pens_jefe",
+  # Nueva señal combinada
+  "edu_occ_lp"
+)
+
+# Si no existe edu_occ_lp, créalo (mean_edu_occ * Lp)
+if (!"edu_occ_lp" %in% names(train_hogares)) {
+  train_hogares <- train_hogares %>% mutate(edu_occ_lp = mean_edu_occ * Lp)
+}
+if (!"edu_occ_lp" %in% names(test_hogares)) {
+  test_hogares  <- test_hogares  %>% mutate(edu_occ_lp = mean_edu_occ * Lp)
+}
+
+# ----------------------------------------------------------
+# 1) Armar data y tipos — clase positiva "pobre"
+# ----------------------------------------------------------
+train_df <- train_hogares %>%
+  mutate(
+    Pobre   = factor(Pobre, levels = c(1,0), labels = c("pobre","no_pobre")),
+    across(where(is.character), as.factor),
+    Dominio = as.factor(Dominio)
+  ) %>%
+  select(id, Pobre, any_of(tierS))
+
+test_df <- test_hogares %>%
+  mutate(
+    across(where(is.character), as.factor),
+    Dominio = as.factor(Dominio)
+  ) %>%
+  select(id, any_of(tierS))
+
+# Predictores comunes
+common_preds <- intersect(names(train_df), names(test_df)) %>% setdiff(c("id","Pobre"))
+train_df <- train_df %>% select(Pobre, all_of(common_preds), id)
+test_df  <- test_df  %>% select(all_of(common_preds), id)
+
+# ----------------------------------------------------------
+# 2) Imputación (mediana num / moda factor) aprendida en TRAIN
+# ----------------------------------------------------------
+# NaN -> NA
+train_df <- train_df %>% mutate(across(where(is.numeric), ~ ifelse(is.nan(.), NA_real_, .)))
+test_df  <- test_df  %>% mutate(across(where(is.numeric), ~ ifelse(is.nan(.), NA_real_, .)))
+
+get_mode <- function(x){
+  ux <- unique(x[!is.na(x)]); if (length(ux)==0) return(NA)
+  ux[which.max(tabulate(match(x, ux)))]
+}
+
+pred_only <- train_df %>% select(all_of(common_preds))
+num_cols  <- names(pred_only)[sapply(pred_only, is.numeric)]
+fac_cols  <- names(pred_only)[sapply(pred_only, function(x) is.factor(x) || is.character(x))]
+
+num_meds <- vapply(pred_only[num_cols], function(x){
+  m <- suppressWarnings(median(x, na.rm=TRUE)); if (is.na(m)) 0 else m
+}, numeric(1))
+fac_modes <- vapply(pred_only[fac_cols], function(x){
+  m <- get_mode(x); if (is.na(m)) "missing" else as.character(m)
+}, character(1))
+
+# TRAIN imputado
+train_imp <- train_df
+for (fc in fac_cols) {
+  if (is.factor(train_imp[[fc]])) {
+    if (!fac_modes[[fc]] %in% levels(train_imp[[fc]]))
+      levels(train_imp[[fc]]) <- c(levels(train_imp[[fc]]), fac_modes[[fc]])
+    train_imp[[fc]][is.na(train_imp[[fc]])] <- fac_modes[[fc]]
+  } else {
+    v <- train_imp[[fc]]; v[is.na(v)] <- fac_modes[[fc]]
+    train_imp[[fc]] <- factor(v)
+  }
+}
+for (nc in num_cols) train_imp[[nc]][is.na(train_imp[[nc]])] <- num_meds[[nc]]
+
+# TEST imputado + alineación de niveles
+test_imp <- test_df
+for (fc in fac_cols) {
+  if (!is.factor(test_imp[[fc]])) test_imp[[fc]] <- factor(test_imp[[fc]])
+  if (!fac_modes[[fc]] %in% levels(test_imp[[fc]]))
+    levels(test_imp[[fc]]) <- c(levels(test_imp[[fc]]), fac_modes[[fc]])
+  test_imp[[fc]][is.na(test_imp[[fc]])] <- fac_modes[[fc]]
+  lvls <- union(levels(train_imp[[fc]]), levels(test_imp[[fc]]))
+  train_imp[[fc]] <- factor(train_imp[[fc]], levels = lvls)
+  test_imp[[fc]]  <- factor(test_imp[[fc]],  levels = lvls)
+}
+for (nc in num_cols) test_imp[[nc]][is.na(test_imp[[nc]])] <- num_meds[[nc]]
+
+stopifnot(all(complete.cases(train_imp %>% select(all_of(common_preds)))))
+stopifnot(all(complete.cases(test_imp  %>% select(all_of(common_preds)))))
+
+# ----------------------------------------------------------
+# 3) CV y grilla optimizando F1 + upsampling
+# ----------------------------------------------------------
+form <- as.formula(paste("Pobre ~", paste(common_preds, collapse = " + ")))
+
+ctrl_F1 <- trainControl(
+  method          = "cv",
+  number          = 5,
+  classProbs      = TRUE,
+  summaryFunction = prSummary,      # AUC, Precision, Recall, F (F1)
+  savePredictions = "final",        # <- necesitamos rf$pred OOF
+  verboseIter     = TRUE,
+  sampling        = "up"            # probar también "down" y "smote"
+)
+
+p <- length(common_preds)
+mtry_vals <- c(3,5,7,9,11)
+minn_vals <- c(5,10,20,50)
+
+grid <- expand.grid(
+  mtry          = mtry_vals,
+  splitrule     = "gini",
+  min.node.size = minn_vals
+)
+
+set.seed(123)
+tree_ranger_grid <- train(
+  form,
+  data        = train_imp %>% select(-id),
+  method      = "ranger",
+  trControl   = ctrl_F1,
+  tuneGrid    = grid,
+  metric      = "F",
+  num.trees   = 1000,                # más árboles ayuda al recall
+  importance  = "impurity",
+  num.threads = parallel::detectCores()
+)
+
+best_hp <- tree_ranger_grid$bestTune
+
+# ----------------------------------------------------------
+# 4) Cutoff óptimo por Precision–Recall (OOF del MEJOR HP)
+#    - Filtramos tree_ranger_grid$pred al bestTune antes de pROC
+# ----------------------------------------------------------
+pred_oof <- tree_ranger_grid$pred %>%
+  semi_join(best_hp, by = c("mtry","splitrule","min.node.size"))
+
+# Alinear factores: pROC espera levels = c(control, case)
+stopifnot(all(levels(pred_oof$obs) %in% c("no_pobre","pobre")))
+pred_oof$obs <- factor(pred_oof$obs, levels = c("no_pobre","pobre"))
+
+roc_obj_en <- pROC::roc(
+  response  = pred_oof$obs,
+  predictor = pred_oof$pobre,   # prob( "pobre" )
+  levels    = c("no_pobre","pobre")  # control, case
+  # direction se infiere
+)
+
+pr_tab <- as.data.frame(
+  pROC::coords(roc_obj_en, seq(0,1,length.out=501),
+               ret = c("threshold","precision","recall"),
+               transpose = FALSE)
+)
+
+# F1 estable (evitar NaN si precision+recall == 0)
+pr_tab <- pr_tab %>%
+  mutate(
+    precision = ifelse(is.finite(precision), precision, 0),
+    recall    = ifelse(is.finite(recall),    recall,    0),
+    F1 = ifelse(precision + recall > 0, 2*precision*recall/(precision+recall), 0)
+  )
+
+thr_opt <- pr_tab$threshold[ which.max(pr_tab$F1) ]
+cat(sprintf("Umbral óptimo (PR F1 OOF) = %.3f\n", thr_opt))
+
+# ----------------------------------------------------------
+# 5) Reentreno final con mejores HP en TODO el TRAIN
+# ----------------------------------------------------------
+set.seed(123)
+rf_final <- train(
+  form,
+  data        = train_imp %>% select(-id),
+  method      = "ranger",
+  trControl   = trainControl(method = "none", classProbs = TRUE),
+  tuneGrid    = best_hp,
+  metric      = "F",
+  num.trees   = 1000,
+  importance  = "impurity",
+  num.threads = parallel::detectCores()
+)
+
+# ----------------------------------------------------------
+# 6) Predicción en TEST con el umbral óptimo y export
+# ----------------------------------------------------------
+test_prob_df <- predict(rf_final, newdata = test_imp, type = "prob")
+p_pobre <- test_prob_df[,"pobre"]
+
+test_label <- factor(ifelse(p_pobre >= thr_opt, "pobre", "no_pobre"),
+                     levels = c("pobre","no_pobre"))
+probRF_1 <- as.integer(test_label == "pobre")
+
+id_out <- if ("id" %in% names(test_hogares)) test_hogares$id else seq_len(nrow(test_imp))
+
+predicciones_hogaresRF <- tibble(
+  id = id_out,
+  pobre_pred = probRF_1
+)
+
+best_mtry          <- best_hp$mtry
+best_min.node.size <- best_hp$min.node.size
+nombre_archivoRF <- sprintf(
+  "RF_mtry_%s_min.node.size_%s_thr_%s.csv",
+  best_mtry,
+  best_min.node.size,
+  format(round(thr_opt, 3), nsmall = 3)
+)
+
+kaggle_sub <- predicciones_hogaresRF %>%
+  transmute(
+    id    = as.character(id),
+    pobre = as.integer(pobre_pred)
+  )
+
+write_csv(kaggle_sub, here::here("stores", nombre_archivoRF))
+cat("Archivo escrito en: ", here::here("stores", nombre_archivoRF), "\n")
+
+
+```
+
+```{r}
+print(tree_ranger_grid)
+```
 
 
 
