@@ -553,13 +553,76 @@ kaggle_sub <- predicciones_hogaresRF %>%
 # Guardar
 write_csv(kaggle_sub, here::here("stores", nombre_archivoRF))
 
+###Modelo 7 (Random Forest - Optimizamos threshold con Precision recall Curve)
+
+p_load("pROC") # Paquete para calcular y visualizar curvas ROC
+
+roc_obj_en<-roc(response=tree_ranger_grid$pred$obs,  # Valores reales de la variable objetivo
+                   predictor=tree_ranger_grid$pred$pobre, # Probabilidades predichas por el modelo
+                  levels = c("no_pobre", "pobre"),  # # Establece la referencia control y caso (empleado = negativo, desempleado = positivo) 
+                  direction = "<")  # "<" significa que "desempleado" es positivo
+     
+prec_recall<-data.frame(coords(roc_obj_en, seq(0,1,length=100), ret=c("threshold", "precision", "recall")))
+prec_recall
+
+prec_recall<- prec_recall  %>% mutate(F1=(2*precision*recall)/(precision+recall))
+prec_recall
+
+prec_recall$threshold[which.max(prec_recall$F1)]
+
+# Predicción de probabilidad de desempleo
+test_RFPR<- test_final  %>% mutate(pobre_hat_ranger=predict(tree_ranger_grid,newdata = test_final, type = "prob"))
+
+# Clasificación según el umbral óptimo de F1
+test_RFPR <- test_RFPR %>%
+  mutate(pobre_hat_rangerPRs_cutoff_F1 = factor(
+    ifelse(pobre_hat_ranger$pobre >= prec_recall$threshold[which.max(prec_recall$F1)], 1, 0),
+    levels = c(1, 0),
+    labels = c("pobre", "no_pobre")
+  ))
+probRF_1 <- ifelse (test_RFPR$pobre_hat_rangerPRs_cutoff_F1=="no_pobre",0,1)
+
+
+# ✅ Usa la misma fuente de IDs que funcionó con el LOGIT
+id_out <- if ("id" %in% names(test_hogares_enriquecido)) {
+  test_hogares_enriquecido$id
+} else {
+  seq_len(nrow(test_hogares_enriquecido))
+}
+
+predicciones_hogaresRF <- tibble(
+  id = id_out,
+  pobre_pred   = probRF_1
+)
+
+# Mantener consistencia con nombres y formato
+best_mtry  <- tree_ranger_grid$bestTune$mtry
+best_min.node.size <- tree_ranger_grid$bestTune$min.node.size
+best_splitrule <- prec_recall$threshold[which.max(prec_recall$F1)]
+
+nombre_archivoRF <- sprintf(
+  "RF_mtry_%s_min.node.size_%s_SR_%s.csv",
+  format(best_mtry, 3),
+  format(best_min.node.size, 2),
+  format(best_splitrule, 2)  # para que quede trazable el cutoff
+)
+
+kaggle_sub <- predicciones_hogaresRF %>%
+  transmute(
+    id    = as.character(id),
+    pobre = as.integer(pobre_pred)
+  )
+
+# Guardar
+write_csv(kaggle_sub, here::here("stores", nombre_archivoRF))
+
 
 
 ```
 
 
 ```{r}
-#Modelo 6 (Random Forest)
+#Modelo 6 (Random Forest) #IGNORAR
 ctrl <- trainControl(method = "cv", number = 10, classProbs = TRUE, summaryFunction = fiveStats, savePredictions = TRUE)
 
 
