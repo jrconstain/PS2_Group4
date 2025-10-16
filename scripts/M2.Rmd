@@ -1,0 +1,330 @@
+---
+title: "M2"
+author: "G4"
+date: "2025-10-12"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(pacman)
+
+p_load(rio, # Import/export data.
+       tidyverse, # Tidy-data.
+       stargazer, # Descriptive statistics.
+       gt, # Descriptive statistics.
+       gtsummary,
+       caret, # For predictive model assessment.
+       gridExtra, # Arrange plots.
+       skimr, # Summarize data.
+       here, #for file searching
+       readr, #for opening files
+       ggplot2,
+       boot,
+       scales,
+       car,
+       dplyr,
+       tidyr,
+       MLmetrics, 
+       glmnet
+       )
+```
+
+```{r}
+
+ruta5 <- here("stores", "train_hogares_enriquecido_2.csv")
+train_hogares <- read_csv(ruta5)
+
+ruta6 <- here("stores", "test_hogares_enriquecido_2.csv")
+test_hogares <- read_csv(ruta6)
+
+```
+
+```{r}
+train_hogares <- train_hogares %>%
+  select(-ends_with(".x"), -ends_with(".y")) %>%
+  distinct(id, .keep_all = TRUE)
+
+test_hogares <- test_hogares %>%
+  select(-ends_with(".x"), -ends_with(".y")) %>%
+  distinct(id, .keep_all = TRUE)
+```
+
+```{r}
+
+# División segura
+div_segura <- function(num, den) ifelse(is.na(num) | is.na(den) | den <= 0, NA_real_, num/den)
+
+cod_arriendo <- c(3)
+
+crear_vars_min <- function(df_hog){
+  df_hog %>%
+    mutate(
+      # Renombres claros
+      cuartos_totales = as.numeric(P5000),   # total de cuartos (incluye sala/comedor)
+      cuartos_dormir  = as.numeric(P5010),   # cuartos usados para dormir (alcobas)
+      Lp_num          = suppressWarnings(as.numeric(Lp)),
+
+      # Limpiezas suaves
+      cuartos_totales = ifelse(!is.na(cuartos_totales) & cuartos_totales < 1, NA_real_, cuartos_totales),
+      cuartos_dormir  = ifelse(!is.na(cuartos_dormir)  & cuartos_dormir  < 0, NA_real_, cuartos_dormir),
+      cuartos_dormir  = ifelse(!is.na(cuartos_totales) & !is.na(cuartos_dormir) &
+                               cuartos_dormir > cuartos_totales, cuartos_totales, cuartos_dormir),
+
+      # Variables pedidas
+      hacinamiento_alcoba      = div_segura(Nper, cuartos_dormir),
+      hacinamiento_total       = div_segura(Nper, cuartos_totales),
+      hacinamiento_severo      = ifelse(is.na(hacinamiento_alcoba), NA_integer_,
+                                   as.integer(hacinamiento_alcoba >= 3)),
+      hacinamiento_total_alto  = ifelse(is.na(hacinamiento_total), NA_integer_,
+                                   as.integer(hacinamiento_total > 2)),
+      proporcion_alcobas       = div_segura(cuartos_dormir, cuartos_totales),
+      brecha_gasto             = ifelse(!is.na(Nper) & !is.na(Npersug), Nper - Npersug, NA_real_),
+
+      # Arriendo (para interacción con Lp)
+      arriendo = ifelse(P5090 %in% cod_arriendo, 1L,
+                   ifelse(is.na(P5090), NA_integer_, 0L)),
+
+      # Interacciones con Lp
+      hacinamiento_alcoba_x_lp = ifelse(!is.na(hacinamiento_alcoba) & !is.na(Lp_num),
+                                        hacinamiento_alcoba * Lp_num, NA_real_),
+      arriendo_x_lp            = ifelse(!is.na(arriendo) & !is.na(Lp_num),
+                                        arriendo * Lp_num, NA_real_)
+    ) %>%
+    select(
+      id, Nper, Npersug,
+      cuartos_totales, cuartos_dormir,
+      hacinamiento_alcoba, hacinamiento_total,
+      hacinamiento_severo, hacinamiento_total_alto,
+      proporcion_alcobas, brecha_gasto,
+      arriendo, Lp_num,
+      hacinamiento_alcoba_x_lp, arriendo_x_lp,
+      everything()
+    )
+}
+
+# >>> APLICAR A TUS DFS <<<
+train_hogares <- crear_vars_min(train_hogares)
+test_hogares  <- crear_vars_min(test_hogares)
+
+```
+
+```{r}
+skim(train_hogares)
+```
+
+```{r}
+# ==========================================================
+# Random Forest
+
+
+set.seed(123)
+
+# ----------------------------------------------------------
+# 0) Selección de variables
+#    (todas existen en train y test, según tu dump)
+# ----------------------------------------------------------
+preds <- c(
+  # Vivienda / servicios / costo de vida
+  "Nper","Npersug","cuartos_totales","cuartos_dormir",
+  "hacinamiento_alcoba","hacinamiento_total",
+  "hacinamiento_severo","hacinamiento_total_alto",
+  "proporcion_alcobas","brecha_gasto","arriendo",
+  "hacinamiento_alcoba_x_lp","arriendo_x_lp",
+  "Clase","Dominio","P5000","P5010","P5090","Li","Lp",
+  # Capital humano / laboral (personas -> hogar)
+  "mean_edu_occ","edu_prom_occ","jefe_max_edu",
+  "prop_occ_nper","prop_occ_pet","prop_des",
+  "prestaciones","horas_prom_occ",
+  "tam_emp_jefe","tam_emp_prom_occ",
+  "cotiza_pens_jefe","pos_ocup_jefe",
+  "sexo_jefe","edad_jefe","edad_prom_occ",
+  "antig_jefe","antig_prom_occ"
+)
+
+# Columnas a NO usar (ID, target, ingresos/pesos, etc.)
+drop_cols <- c("id","Pobre","Indigente","Npobres","Nindigentes",
+               "Fex_c","Fex_dpto","Ingtotug","Ingtotugarr","Ingpcug",
+               "Depto","Lp_num")
+
+# ----------------------------------------------------------
+# 1) Armar dataframes base y tipos (Pobre yes/no)
+# ----------------------------------------------------------
+train_df <- train_hogares %>%
+  mutate(
+    Pobre   = factor(Pobre, levels = c(1,0), labels = c("yes","no")),
+    across(where(is.character), as.factor),
+    Dominio = as.factor(Dominio)
+  ) %>%
+  select(any_of(c("id","Pobre", preds)))
+
+test_df <- test_hogares %>%
+  mutate(
+    across(where(is.character), as.factor),
+    Dominio = as.factor(Dominio)
+  ) %>%
+  select(any_of(c("id", preds)))  # test no necesita Pobre
+
+# Asegurar intersección (por si alguna faltó en test)
+common_preds <- intersect(names(train_df), names(test_df)) %>% setdiff(drop_cols)
+train_df <- train_df %>% select(Pobre, all_of(common_preds), id)
+test_df  <- test_df  %>% select(all_of(common_preds), id)
+
+# ----------------------------------------------------------
+# 2) Imputación (mediana num / moda factor) aprendida en TRAIN
+#    - Primero: convertir NaN -> NA en ambos
+#    - Aprender imputadores SOLO en train (predictores)
+#    - Aplicar a train y test
+# ----------------------------------------------------------
+# NaN -> NA
+train_df <- train_df %>% mutate(across(where(is.numeric), ~ ifelse(is.nan(.), NA_real_, .)))
+test_df  <- test_df  %>% mutate(across(where(is.numeric), ~ ifelse(is.nan(.), NA_real_, .)))
+
+# Helpers de imputación
+get_mode <- function(x) {
+  ux <- unique(x[!is.na(x)])
+  if (length(ux) == 0) return(NA)  # sin info
+  ux[which.max(tabulate(match(x, ux)))]
+}
+
+# Aprender imputadores en TRAIN (solo predictores)
+train_pred <- train_df %>% select(all_of(common_preds))
+
+num_cols   <- names(train_pred)[sapply(train_pred, is.numeric)]
+fact_cols  <- names(train_pred)[sapply(train_pred, function(x) is.factor(x) || is.character(x))]
+
+num_medians <- vapply(train_pred[num_cols], function(x){
+  m <- suppressWarnings(median(x, na.rm = TRUE))
+  if (is.na(m)) 0 else m
+}, numeric(1))
+
+fact_modes <- vapply(train_pred[fact_cols], function(x){
+  m <- get_mode(x)
+  if (is.na(m)) "missing" else as.character(m)
+}, character(1))
+
+# Aplicar imputación a TRAIN
+train_imp <- train_df
+
+# 2.1 Factores/char: si la moda es "missing" y no está en niveles, agregar nivel
+for (fc in fact_cols) {
+  if (is.factor(train_imp[[fc]])) {
+    if (!fact_modes[[fc]] %in% levels(train_imp[[fc]])) {
+      levels(train_imp[[fc]]) <- c(levels(train_imp[[fc]]), fact_modes[[fc]])
+    }
+    train_imp[[fc]][is.na(train_imp[[fc]])] <- fact_modes[[fc]]
+  } else {
+    # character -> factor después de imputar
+    v <- train_imp[[fc]]
+    v[is.na(v)] <- fact_modes[[fc]]
+    train_imp[[fc]] <- factor(v)
+  }
+}
+
+# 2.2 Numéricas: NA -> mediana aprendida
+for (nc in num_cols) {
+  train_imp[[nc]][is.na(train_imp[[nc]])] <- num_medians[[nc]]
+}
+
+# Aplicar imputación a TEST con los mismos valores
+test_imp <- test_df
+
+# Factores: asegurar que el nivel de la moda exista en test; si no, agregar
+for (fc in fact_cols) {
+  # convertir a factor si no lo es
+  if (!is.factor(test_imp[[fc]])) test_imp[[fc]] <- factor(test_imp[[fc]])
+  if (!fact_modes[[fc]] %in% levels(test_imp[[fc]])) {
+    levels(test_imp[[fc]]) <- c(levels(test_imp[[fc]]), fact_modes[[fc]])
+  }
+  test_imp[[fc]][is.na(test_imp[[fc]])] <- fact_modes[[fc]]
+
+  # Alinear niveles de test con train (evita warning por niveles nuevos)
+  common_lvls <- union(levels(train_imp[[fc]]), levels(test_imp[[fc]]))
+  train_imp[[fc]] <- factor(train_imp[[fc]], levels = common_lvls)
+  test_imp[[fc]]  <- factor(test_imp[[fc]],  levels = common_lvls)
+}
+
+# Numéricas en TEST
+for (nc in num_cols) {
+  test_imp[[nc]][is.na(test_imp[[nc]])] <- num_medians[[nc]]
+}
+
+# Comprobar que ya no haya NA en predictores
+stopifnot(all(complete.cases(train_imp %>% select(all_of(common_preds)))))
+stopifnot(all(complete.cases(test_imp  %>% select(all_of(common_preds)))))
+
+# ----------------------------------------------------------
+# 3) Fórmula, control y grilla (estilo profe)
+#    Optimiza F1 (prSummary -> "F")
+# ----------------------------------------------------------
+form <- as.formula(paste("Pobre ~", paste(common_preds, collapse = " + ")))
+
+ctrl_F1 <- trainControl(
+  method          = "cv",
+  number          = 5,
+  classProbs      = TRUE,      # prSummary necesita probs
+  summaryFunction = prSummary, # AUC, Precision, Recall, F (F1)
+  savePredictions = "final"
+)
+
+# mtry = {sqrt(p), medio, p} con p = #predictores
+p <- length(common_preds)
+mtry_low  <- max(2, floor(sqrt(p)))
+mtry_high <- p
+mtry_mid  <- max(2, round((mtry_low + mtry_high) / 2))
+mtry_vals <- unique(c(mtry_low, mtry_mid, mtry_high))
+minn_vals <- c(30, 50) # como el profe
+
+grid <- expand.grid(
+  mtry          = mtry_vals,
+  splitrule     = "gini",
+  min.node.size = minn_vals
+)
+
+cat("p =", p, " | mtry =", paste(mtry_vals, collapse = ", "), "\n")
+
+# ----------------------------------------------------------
+# 4) Entrenar (caret::train, método ranger) optimizando F1
+# ----------------------------------------------------------
+set.seed(123)
+tree_ranger_F1 <- train(
+  form,
+  data       = train_imp %>% select(-id),
+  method     = "ranger",
+  trControl  = ctrl_F1,
+  tuneGrid   = grid,
+  metric     = "F",       # <<< OPTIMIZA F1
+  num.trees  = 500,
+  importance = "impurity"
+)
+
+print(tree_ranger_F1)
+print(tree_ranger_F1$bestTune)  # mejores hiperparámetros por F1
+
+# ----------------------------------------------------------
+# 5) Predicción en TEST y export Kaggle (id, pobre)
+# ----------------------------------------------------------
+test_pred_cls <- predict(tree_ranger_F1, newdata = test_imp, type = "raw")
+
+predicciones_hogaresRF <- test_imp %>%
+  transmute(
+    id         = as.character(id),
+    pobre_pred = as.integer(test_pred_cls == "yes")  # yes->1, no->0
+  )
+
+kaggle_sub <- predicciones_hogaresRF %>%
+  transmute(
+    id    = as.character(id),
+    pobre = as.integer(pobre_pred)
+  )
+
+nombre_archivoRF <- "RF_gini_F1.csv"
+write_csv(kaggle_sub, here::here("stores", nombre_archivoRF))
+
+
+
+```
+
