@@ -175,10 +175,7 @@ test_df  <- test_df  %>% select(all_of(common_preds), id)
 
 # ----------------------------------------------------------
 # 2) Imputación (mediana num / moda factor) aprendida en TRAIN
-#    - Primero: convertir NaN -> NA en ambos
-#    - Aprender imputadores SOLO en train (predictores)
-#    - Aplicar a train y test
-# ----------------------------------------------------------
+
 # NaN -> NA
 train_df <- train_df %>% mutate(across(where(is.numeric), ~ ifelse(is.nan(.), NA_real_, .)))
 test_df  <- test_df  %>% mutate(across(where(is.numeric), ~ ifelse(is.nan(.), NA_real_, .)))
@@ -190,7 +187,6 @@ get_mode <- function(x) {
   ux[which.max(tabulate(match(x, ux)))]
 }
 
-# Aprender imputadores en TRAIN (solo predictores)
 train_pred <- train_df %>% select(all_of(common_preds))
 
 num_cols   <- names(train_pred)[sapply(train_pred, is.numeric)]
@@ -276,7 +272,7 @@ mtry_low  <- max(2, floor(sqrt(p)))
 mtry_high <- p
 mtry_mid  <- max(2, round((mtry_low + mtry_high) / 2))
 mtry_vals <- unique(c(mtry_low, mtry_mid, mtry_high))
-minn_vals <- c(30, 50) # como el profe
+minn_vals <- c(30, 50)
 
 grid <- expand.grid(
   mtry          = mtry_vals,
@@ -327,4 +323,172 @@ write_csv(kaggle_sub, here::here("stores", nombre_archivoRF))
 
 
 ```
+
+
+```{r}
+
+# Árbol de Clasificación (rpart2) optimizando F1 variables usadas por Juan José en EN
+
+set.seed(123)
+
+# -------------------------------
+# 0) Variables base
+# -------------------------------
+vars <- c(
+  "P5000","P5010","P5090","P5100","P5130","P5140",
+  "Nper","Npersug","Depto","Lp",
+  "mean_edu_occ","prop_occ_nper","prop_occ_pet","jefe_max_edu","horas_prom_occ",
+  "sexo_jefe","antig_jefe","antig_prom_occ","edu_prom_occ","prop_des",
+  "edad_jefe","edad_prom_occ","prestaciones","tam_emp_jefe","tam_emp_prom_occ",
+  "cotiza_pens_jefe","pos_ocup_jefe"
+)
+
+# -------------------------------
+# 1) Derivadas en train/test
+# -------------------------------
+train_hogares_enriquecido <- train_hogares %>%
+  mutate(
+    edad_jefe2       = edad_jefe^2,
+    edad_prom_occ2   = edad_prom_occ^2,
+    sexo_desocup     = sexo_jefe * prop_des,
+    edu_occ_lp       = mean_edu_occ * Lp,
+    horasxedu_occ    = horas_prom_occ * mean_edu_occ
+  )
+
+test_hogares_enriquecido <- test_hogares %>%
+  mutate(
+    edad_jefe2       = edad_jefe^2,
+    edad_prom_occ2   = edad_prom_occ^2,
+    sexo_desocup     = sexo_jefe * prop_des,
+    edu_occ_lp       = mean_edu_occ * Lp,
+    horasxedu_occ    = horas_prom_occ * mean_edu_occ
+  )
+
+# Añadir nuevas al vector
+vars <- c(vars, "edad_jefe2","edad_prom_occ2","sexo_desocup","edu_occ_lp","horasxedu_occ")
+
+# 3) Armado de data (clasificación yes/no)
+
+train_df <- train_hogares_enriquecido %>%
+  mutate(
+    Pobre = factor(Pobre, levels = c(1,0), labels = c("yes","no")),
+    across(where(is.character), as.factor),
+    Depto = as.factor(Depto)
+  ) %>%
+  select(id, Pobre, any_of(vars))
+
+test_df <- test_hogares_enriquecido %>%
+  mutate(
+    across(where(is.character), as.factor),
+    Depto = as.factor(Depto)
+  ) %>%
+  select(id, any_of(vars))
+
+# Predictores comunes
+common_preds <- intersect(names(train_df), names(test_df)) |> setdiff(c("id","Pobre"))
+train_df <- train_df %>% select(Pobre, all_of(common_preds), id)
+test_df  <- test_df  %>% select(all_of(common_preds), id)
+
+# -------------------------------
+# 4) Imputación (mediana num / moda factor) aprendida en TRAIN
+# -------------------------------
+# NaN -> NA
+train_df <- train_df %>% mutate(across(where(is.numeric), ~ ifelse(is.nan(.), NA_real_, .)))
+test_df  <- test_df  %>% mutate(across(where(is.numeric), ~ ifelse(is.nan(.), NA_real_, .)))
+
+get_mode <- function(x){
+  ux <- unique(x[!is.na(x)]); if(length(ux)==0) return(NA); ux[which.max(tabulate(match(x, ux)))]
+}
+
+train_pred <- train_df %>% select(all_of(common_preds))
+num_cols  <- names(train_pred)[sapply(train_pred, is.numeric)]
+fact_cols <- names(train_pred)[sapply(train_pred, function(x) is.factor(x) || is.character(x))]
+
+num_medians <- vapply(train_pred[num_cols], function(x){
+  m <- suppressWarnings(median(x, na.rm=TRUE)); if(is.na(m)) 0 else m
+}, numeric(1))
+
+fact_modes <- vapply(train_pred[fact_cols], function(x){
+  m <- get_mode(x); if(is.na(m)) "missing" else as.character(m)
+}, character(1))
+
+# Aplicar a TRAIN
+train_imp <- train_df
+for(fc in fact_cols){
+  if(is.factor(train_imp[[fc]])){
+    if(!fact_modes[[fc]] %in% levels(train_imp[[fc]]))
+      levels(train_imp[[fc]]) <- c(levels(train_imp[[fc]]), fact_modes[[fc]])
+    train_imp[[fc]][is.na(train_imp[[fc]])] <- fact_modes[[fc]]
+  } else {
+    v <- train_imp[[fc]]; v[is.na(v)] <- fact_modes[[fc]]; train_imp[[fc]] <- factor(v)
+  }
+}
+for(nc in num_cols){
+  train_imp[[nc]][is.na(train_imp[[nc]])] <- num_medians[[nc]]
+}
+
+# Aplicar a TEST con los mismos imputadores y alinear niveles
+test_imp <- test_df
+for(fc in fact_cols){
+  if(!is.factor(test_imp[[fc]])) test_imp[[fc]] <- factor(test_imp[[fc]])
+  if(!fact_modes[[fc]] %in% levels(test_imp[[fc]]))
+    levels(test_imp[[fc]]) <- c(levels(test_imp[[fc]]), fact_modes[[fc]])
+  test_imp[[fc]][is.na(test_imp[[fc]])] <- fact_modes[[fc]]
+  lvls <- union(levels(train_imp[[fc]]), levels(test_imp[[fc]]))
+  train_imp[[fc]] <- factor(train_imp[[fc]], levels = lvls)
+  test_imp[[fc]]  <- factor(test_imp[[fc]],  levels = lvls)
+}
+for(nc in num_cols){
+  test_imp[[nc]][is.na(test_imp[[nc]])] <- num_medians[[nc]]
+}
+
+stopifnot(all(complete.cases(train_imp %>% select(all_of(common_preds)))))
+stopifnot(all(complete.cases(test_imp  %>% select(all_of(common_preds)))))
+
+# -------------------------------
+# 5) Tuning del árbol (rpart2) optimizando F1
+# -------------------------------
+form <- as.formula(paste("Pobre ~", paste(common_preds, collapse = " + ")))
+
+ctrl_F1 <- trainControl(
+  method = "cv", number = 5,
+  classProbs = TRUE,
+  summaryFunction = prSummary,
+  savePredictions = "final"
+)
+
+grid_dt <- expand.grid(maxdepth = 2:10)
+set.seed(123)
+dt_clasif_F1 <- train(
+  form,
+  data       = train_imp %>% select(-id),
+  method     = "rpart2",
+  trControl  = ctrl_F1,
+  tuneGrid   = grid_dt,
+  metric     = "F"
+)
+
+print(dt_clasif_F1)
+print(dt_clasif_F1$bestTune)
+
+# -------------------------------
+# 6) Predicción en TEST y export para Kaggle
+# -------------------------------
+test_pred_cls <- predict(dt_clasif_F1, newdata = test_imp, type = "raw")  # "yes"/"no"
+
+kaggle_sub <- test_imp %>%
+  transmute(
+    id    = as.character(id),
+    pobre = as.integer(test_pred_cls == "yes")
+  )
+
+write_csv(kaggle_sub, here::here("stores", "CART_clasif_F1.csv"))
+
+```
+
+
+
+
+
+
 
