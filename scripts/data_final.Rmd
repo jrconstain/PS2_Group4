@@ -153,10 +153,11 @@ agg_personas_to_hogares_plus_2 <- function(df_personas) {
       pos_ocup_jefe   = dplyr::coalesce(dplyr::first(P6430[P6050 == 1]), 0),
       antig_jefe      = dplyr::coalesce(dplyr::first(P6426[P6050 == 1]), 0), # si NA -> 0
       jefe_max_edu    = max(P6210[P6050 == 1], na.rm = TRUE),  # LEGADO (cód. educ. máx.)
-      jefe_max_edu_years = ifelse(any(P6050 == 1),
-                                  max(edu_years[P6050 == 1], na.rm = TRUE),
-                                  NA_real_),                   # NUEVA (años)
-
+      jefe_max_edu_years = {
+        val <- max(P6210[P6050 == 1], na.rm = TRUE)
+        if (is.finite(val)) val else 0
+      },
+      
       # Indicadores del jefe
       jefe_ocupado     = as.integer(any(P6050 == 1 & Oc == 1, na.rm = TRUE)),
       prestaciones_jefe= as.integer(any(P6050 == 1 &
@@ -202,7 +203,8 @@ agg_personas_to_hogares_plus_2 <- function(df_personas) {
 
       # ===== DESOCUPACIÓN CON INGRESOS (CLASIFICACIÓN) ========================
       n_desoc_con_ingresos   = sum(Des == 1 & (P7422 == 1 | P7472 == 1), na.rm = TRUE),
-      desoc_con_ingresos_cat = dplyr::case_when(
+      
+      desoc_con_ingresos_cat_chr = dplyr::case_when(
         n_des == 0 ~ "sin_desocupados",
         n_des > 0 & n_desoc_con_ingresos > 0 ~ "desoc_con_ingresos",
         n_des > 0 & n_desoc_con_ingresos == 0 ~ "desoc_sin_ingresos",
@@ -278,17 +280,11 @@ agg_personas_to_hogares_plus_2 <- function(df_personas) {
 ```{r}
 # Aplicar al TRAIN: personas -> hogares
 train_agg <- agg_personas_to_hogares_plus_2(df_train_personas)
-df_train_hogares <- df_train_hogares %>% left_join(train_agg, by = "id")
+train_hogares_enriquecido <- df_train_hogares %>% left_join(train_agg, by = "id")
 
 # Aplicar al TEST: personas -> hogares
 test_agg <- agg_personas_to_hogares_plus_2(df_test_personas)
-df_test_hogares  <- df_test_hogares  %>% left_join(test_agg,  by = "id")
-```
-
-```{r}
-# Guardar datasets enriquecidos en "stores/"
-write_csv(df_train_hogares, here::here("stores", "train_hogares_enriquecido_final.csv"))
-write_csv(df_test_hogares,  here::here("stores", "test_hogares_enriquecido_final.csv"))
+test_hogares_enriquecido  <- df_test_hogares  %>% left_join(test_agg,  by = "id")
 ```
 
 ```{r}
@@ -398,5 +394,35 @@ test_final[cat_vars] <- lapply(test_final[cat_vars], as.character)
 # IMPUTACIÓN
 # ============================================================
 
+# 0 para numericas faltantes
+for (v in num_vars) {
+  train_use[[v]][is.na(train_use[[v]])] <- 0
+  test_final[[v]][is.na(test_final[[v]])] <- 0
+}
 
+# cotiza_pens_jefe: imputar NA a "2" (No)
+train_use$cotiza_pens_jefe[is.na(train_use$cotiza_pens_jefe)] <- "2"
+test_final$cotiza_pens_jefe[is.na(test_final$cotiza_pens_jefe)] <- "2"
+
+# ppos_ocup_jefe: crear nuevo nivel "0" y asignar a NA
+levels(train_use$pos_ocup_jefe) <- c(levels(train_use$pos_ocup_jefe), "0")
+levels(test_final$pos_ocup_jefe) <- c(levels(test_final$pos_ocup_jefe), "0")
+
+train_use$pos_ocup_jefe[is.na(train_use$pos_ocup_jefe)] <- "0"
+test_final$pos_ocup_jefe[is.na(test_final$pos_ocup_jefe)] <- "0"
+
+for (v in cat_vars) {
+  niveles <- union(levels(train_use[[v]]), unique(test_final[[v]]))
+  train_use[[v]] <- factor(train_use[[v]], levels = niveles)
+  test_final[[v]] <- factor(test_final[[v]], levels = niveles)
+}
+
+colSums(is.na(train_use))
+
+```
+
+```{r}
+# Guardar datasets enriquecidos en "stores/"
+write_csv(train_use, here::here("stores", "train_hogares_enriquecido_final.csv"))
+write_csv(test_final,  here::here("stores", "test_hogares_enriquecido_final.csv"))
 ```
