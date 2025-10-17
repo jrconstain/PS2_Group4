@@ -31,7 +31,8 @@ p_load(rio, # Import/export data.
        MLmetrics, 
        glmnet,
        pROC,
-       rpart
+       rpart,
+       gbm
        )
 ```
 
@@ -60,23 +61,19 @@ test_hogares <- test_hogares %>%
 # División segura
 div_segura <- function(num, den) ifelse(is.na(num) | is.na(den) | den <= 0, NA_real_, num/den)
 
-cod_arriendo <- c(3)
-
 crear_vars_min <- function(df_hog){
   df_hog %>%
     mutate(
-      # Renombres claros
+      # Renombres claros65l;
       cuartos_totales = as.numeric(P5000),   # total de cuartos (incluye sala/comedor)
       cuartos_dormir  = as.numeric(P5010),   # cuartos usados para dormir (alcobas)
-      Lp_num          = suppressWarnings(as.numeric(Lp)),
 
-      # Limpiezas suaves
       cuartos_totales = ifelse(!is.na(cuartos_totales) & cuartos_totales < 1, NA_real_, cuartos_totales),
       cuartos_dormir  = ifelse(!is.na(cuartos_dormir)  & cuartos_dormir  < 0, NA_real_, cuartos_dormir),
       cuartos_dormir  = ifelse(!is.na(cuartos_totales) & !is.na(cuartos_dormir) &
                                cuartos_dormir > cuartos_totales, cuartos_totales, cuartos_dormir),
 
-      # Variables pedidas
+      # Variables 
       hacinamiento_alcoba      = div_segura(Nper, cuartos_dormir),
       hacinamiento_total       = div_segura(Nper, cuartos_totales),
       hacinamiento_severo      = ifelse(is.na(hacinamiento_alcoba), NA_integer_,
@@ -84,17 +81,8 @@ crear_vars_min <- function(df_hog){
       hacinamiento_total_alto  = ifelse(is.na(hacinamiento_total), NA_integer_,
                                    as.integer(hacinamiento_total > 2)),
       proporcion_alcobas       = div_segura(cuartos_dormir, cuartos_totales),
-      brecha_gasto             = ifelse(!is.na(Nper) & !is.na(Npersug), Nper - Npersug, NA_real_),
+      brecha_gasto             = ifelse(!is.na(Nper) & !is.na(Npersug), Nper - Npersug, NA_real_)
 
-      # Arriendo (para interacción con Lp)
-      arriendo = ifelse(P5090 %in% cod_arriendo, 1L,
-                   ifelse(is.na(P5090), NA_integer_, 0L)),
-
-      # Interacciones con Lp
-      hacinamiento_alcoba_x_lp = ifelse(!is.na(hacinamiento_alcoba) & !is.na(Lp_num),
-                                        hacinamiento_alcoba * Lp_num, NA_real_),
-      arriendo_x_lp            = ifelse(!is.na(arriendo) & !is.na(Lp_num),
-                                        arriendo * Lp_num, NA_real_)
     ) %>%
     select(
       id, Nper, Npersug,
@@ -102,8 +90,6 @@ crear_vars_min <- function(df_hog){
       hacinamiento_alcoba, hacinamiento_total,
       hacinamiento_severo, hacinamiento_total_alto,
       proporcion_alcobas, brecha_gasto,
-      arriendo, Lp_num,
-      hacinamiento_alcoba_x_lp, arriendo_x_lp,
       everything()
     )
 }
@@ -148,7 +134,7 @@ preds <- c(
 )
 
 # Columnas a NO usar (ID, target, ingresos/pesos, etc.)
-drop_cols <- c("id","Pobre","Indigente","Npobres","Nindigentes",
+drop_cols <- c("id","Pobre","Indigente","NPobres","Nindigentes",
                "Fex_c","Fex_dpto","Ingtotug","Ingtotugarr","Ingpcug",
                "Depto","Lp_num")
 
@@ -303,20 +289,20 @@ print(tree_ranger_F1)
 print(tree_ranger_F1$bestTune)  # mejores hiperparámetros por F1
 
 # ----------------------------------------------------------
-# 5) Predicción en TEST y export Kaggle (id, pobre)
+# 5) Predicción en TEST y export Kaggle (id, Pobre)
 # ----------------------------------------------------------
 test_pred_cls <- predict(tree_ranger_F1, newdata = test_imp, type = "raw")
 
 predicciones_hogaresRF <- test_imp %>%
   transmute(
     id         = as.character(id),
-    pobre_pred = as.integer(test_pred_cls == "yes")  # yes->1, no->0
+    Pobre_pred = as.integer(test_pred_cls == "yes")  # yes->1, no->0
   )
 
 kaggle_sub <- predicciones_hogaresRF %>%
   transmute(
     id    = as.character(id),
-    pobre = as.integer(pobre_pred)
+    Pobre = as.integer(Pobre_pred)
   )
 
 nombre_archivoRF <- "RF_gini_F1.csv"
@@ -494,7 +480,7 @@ test_pred_cls <- predict(dt_clasif_F1, newdata = test_imp, type = "raw")  # "yes
 kaggle_sub <- test_imp %>%
   transmute(
     id    = as.character(id),
-    pobre = as.integer(test_pred_cls == "yes")
+    Pobre = as.integer(test_pred_cls == "yes")
   )
 
 write_csv(kaggle_sub, here::here("stores", "CART_clasif_F1.csv"))
@@ -507,11 +493,11 @@ cat("Archivo guardado en:", here::here("stores", "CART_clasif_F1.csv"), "\n")
 ```{r}
 # ==========================================================
 # RF (caret + ranger) — Tier S + Alternative Cutoffs (Precision–Recall)
-# - Labels: "pobre" (positivo) / "no_pobre" (negativo)
+# - Labels: "Pobre" (positivo) / "no_Pobre" (negativo)
 # - CV 5-fold, metric = "F" (F1), splitrule = "gini"
 # - Imputación: mediana (num) / moda (factor) aprendidas en TRAIN
 # - Umbral óptimo con pROC::coords sobre OOF del MEJOR HP (no todos)
-# - Export: stores/RF_mtry_*_min.node.size_*_thr_*.csv  (id, pobre)
+# - Export: stores/RF_mtry_*_min.node.size_*_thr_*.csv  (id, Pobre)
 # ==========================================================
 
 set.seed(123)
@@ -542,11 +528,11 @@ if (!"edu_occ_lp" %in% names(test_hogares)) {
 }
 
 # ----------------------------------------------------------
-# 1) Armar data y tipos — clase positiva "pobre"
+# 1) Armar data y tipos — clase positiva "Pobre"
 # ----------------------------------------------------------
 train_df <- train_hogares %>%
   mutate(
-    Pobre   = factor(Pobre, levels = c(1,0), labels = c("pobre","no_pobre")),
+    Pobre   = factor(Pobre, levels = c(1,0), labels = c("Pobre","no_Pobre")),
     across(where(is.character), as.factor),
     Dominio = as.factor(Dominio)
   ) %>%
@@ -665,13 +651,13 @@ pred_oof <- tree_ranger_grid$pred %>%
   semi_join(best_hp, by = c("mtry","splitrule","min.node.size"))
 
 # Alinear factores: pROC espera levels = c(control, case)
-stopifnot(all(levels(pred_oof$obs) %in% c("no_pobre","pobre")))
-pred_oof$obs <- factor(pred_oof$obs, levels = c("no_pobre","pobre"))
+stopifnot(all(levels(pred_oof$obs) %in% c("no_Pobre","Pobre")))
+pred_oof$obs <- factor(pred_oof$obs, levels = c("no_Pobre","Pobre"))
 
 roc_obj_en <- pROC::roc(
   response  = pred_oof$obs,
-  predictor = pred_oof$pobre,   # prob( "pobre" )
-  levels    = c("no_pobre","pobre")  # control, case
+  predictor = pred_oof$Pobre,   # prob( "Pobre" )
+  levels    = c("no_Pobre","Pobre")  # control, case
   # direction se infiere
 )
 
@@ -712,17 +698,17 @@ rf_final <- train(
 # 6) Predicción en TEST con el umbral óptimo y export
 # ----------------------------------------------------------
 test_prob_df <- predict(rf_final, newdata = test_imp, type = "prob")
-p_pobre <- test_prob_df[,"pobre"]
+p_Pobre <- test_prob_df[,"Pobre"]
 
-test_label <- factor(ifelse(p_pobre >= thr_opt, "pobre", "no_pobre"),
-                     levels = c("pobre","no_pobre"))
-probRF_1 <- as.integer(test_label == "pobre")
+test_label <- factor(ifelse(p_Pobre >= thr_opt, "Pobre", "no_Pobre"),
+                     levels = c("Pobre","no_Pobre"))
+probRF_1 <- as.integer(test_label == "Pobre")
 
 id_out <- if ("id" %in% names(test_hogares)) test_hogares$id else seq_len(nrow(test_imp))
 
 predicciones_hogaresRF <- tibble(
   id = id_out,
-  pobre_pred = probRF_1
+  Pobre_pred = probRF_1
 )
 
 best_mtry          <- best_hp$mtry
@@ -737,7 +723,7 @@ nombre_archivoRF <- sprintf(
 kaggle_sub <- predicciones_hogaresRF %>%
   transmute(
     id    = as.character(id),
-    pobre = as.integer(pobre_pred)
+    Pobre = as.integer(Pobre_pred)
   )
 
 write_csv(kaggle_sub, here::here("stores", nombre_archivoRF))
@@ -747,10 +733,705 @@ cat("Archivo escrito en: ", here::here("stores", nombre_archivoRF), "\n")
 ```
 
 ```{r}
-print(tree_ranger_grid)
+# MODELO GRADIENTE BOOSTING TREES
+
+# GBM (caret + gbm) — Clasificación, optimizando F1
+# - Etiquetas: "Pobre" (positivo) / "no_Pobre" (negativo)
+# - CV 5-fold, métrica = F1 (umbral óptimo con OOF)
+# - Imputación correcta
+
+set.seed(123)
+
+
+# 0) Variables base
+
+vars <- c(
+  "P5000","P5010","P5090","P5100","P5130","P5140",
+  "Nper","Npersug","Depto","Lp",
+  "mean_edu_occ","prop_occ_nper","prop_occ_pet","jefe_max_edu","horas_prom_occ",
+  "sexo_jefe","antig_jefe","antig_prom_occ","edu_prom_occ","prop_des",
+  "edad_jefe","edad_prom_occ","prestaciones","tam_emp_jefe","tam_emp_prom_occ",
+  "cotiza_pens_jefe","pos_ocup_jefe"
+)
+
+
+# 1) Derivadas en train/test
+
+train_hogares_enriquecido <- train_hogares %>%
+  mutate(
+    edad_jefe2       = edad_jefe^2,
+    edad_prom_occ2   = edad_prom_occ^2,
+    sexo_desocup     = sexo_jefe * prop_des,
+    edu_occ_lp       = mean_edu_occ * Lp,
+    horasxedu_occ    = horas_prom_occ * mean_edu_occ
+  )
+
+test_hogares_enriquecido <- test_hogares %>%
+  mutate(
+    edad_jefe2       = edad_jefe^2,
+    edad_prom_occ2   = edad_prom_occ^2,
+    sexo_desocup     = sexo_jefe * prop_des,
+    edu_occ_lp       = mean_edu_occ * Lp,
+    horasxedu_occ    = horas_prom_occ * mean_edu_occ
+  )
+
+# Añadir nuevas al vector
+vars <- c(vars, "edad_jefe2","edad_prom_occ2","sexo_desocup","edu_occ_lp","horasxedu_occ")
+
+
+# 2) Preparar conjuntos de modelado
+#    - Clase = 'Pobre' (factor con niveles no_Pobre/Pobre)
+#    - Seleccionar columnas necesarias
+
+train_hogares_enriquecido$Pobre <- factor(
+  train_hogares_enriquecido$Pobre,
+  levels = c(0, 1),
+  labels = c("no_Pobre", "Pobre")
+)
+
+train_use <- train_hogares_enriquecido %>%
+  select(id, Pobre, all_of(vars))
+
+test_final <- test_hogares_enriquecido %>%
+  select(id, all_of(vars))
+
+# -------------------------------
+# 3) Tipos (numéricas vs factores)
+
+
+# -------------------------------
+# 4) IMPUTACIÓN EXACTA 
+#    - Numéricas -> 0
+#    - cotiza_pens_jefe: NA -> "2" (No)
+#    - pos_ocup_jefe: agregar nivel "0" y enviar NA a "0"
+# -------------------------------
+
+# cotiza_pens_jefe: imputar NA a "2" (No)
+train_use$cotiza_pens_jefe[is.na(train_use$cotiza_pens_jefe)] <- "2"
+test_final$cotiza_pens_jefe[is.na(test_final$cotiza_pens_jefe)] <- "2"
+
+# ppos_ocup_jefe: crear nuevo nivel "0" y asignar a NA
+levels(train_use$pos_ocup_jefe) <- c(levels(train_use$pos_ocup_jefe), "0")
+levels(test_final$pos_ocup_jefe) <- c(levels(test_final$pos_ocup_jefe), "0")
+
+train_use$pos_ocup_jefe[is.na(train_use$pos_ocup_jefe)] <- "0"
+test_final$pos_ocup_jefe[is.na(test_final$pos_ocup_jefe)] <- "0"
+
+train_use <- droplevels(train_use)
+
+# Numéricas_0 -> 0
+for (v in vars) {
+  train_use[[v]][is.na(train_use[[v]])] <- 0
+  test_final[[v]][is.na(test_final[[v]])] <- 0
+}
+
+
+# -------------------------------
+# 5) Control de entrenamiento
+#    - CV 5-fold
+#    - Guardar predicciones OOF para optimizar umbral F1
+# -------------------------------
+ctrl <- trainControl(
+  method = "cv",
+  number = 5,
+  classProbs = TRUE,              # para probs de la clase positiva
+  savePredictions = "final",      # OOF para buscar umbral
+  summaryFunction = function(data, lev = NULL, model = NULL) {
+    # data$obs: factor real; data$pred: clase predicha (umbral 0.5); data[, lev[2]]: prob de clase positiva
+    # Métricas clásicas + F1 con corte 0.5 (caret evalúa así internamente)
+    # (El F1 definitivo lo optimizaremos con las OOF fuera de este summary)
+    tp <- sum(data$pred == lev[2] & data$obs == lev[2])
+    fp <- sum(data$pred == lev[2] & data$obs != lev[2])
+    fn <- sum(data$pred != lev[2] & data$obs == lev[2])
+    precision <- ifelse(tp + fp == 0, 0, tp / (tp + fp))
+    recall    <- ifelse(tp + fn == 0, 0, tp / (tp + fn))
+    F1        <- ifelse(precision + recall == 0, 0, 2 * precision * recall / (precision + recall))
+    c(Accuracy = mean(data$pred == data$obs), F1 = F1)
+  }
+)
+
+# -------------------------------
+# 6) Grid de hiperparámetros GBM
+# -------------------------------
+gbm_grid <- expand.grid(
+  n.trees = c(200, 300, 500),
+  interaction.depth = c(4, 6),
+  shrinkage = c(0.001, 0.01),
+  n.minobsinnode = c(10, 30)
+)
+
+# -------------------------------
+# 7) Entrenamiento GBM (clasificación)
+# -------------------------------
+formula_gbm <- as.formula(paste("Pobre ~", paste(vars, collapse = " + ")))
+
+gbm_fit <- train(
+  formula_gbm,
+  data = train_use,
+  method = "gbm",
+  trControl = ctrl,
+  metric = "F1",            # usamos F1 del summary (umbral 0.5)
+  verbose = FALSE
+)
+
+gbm_fit$bestTune
+min(gbm_fit$results$F1) # inspeccionar todo gbm_fit$results
+
+# -------------------------------
+# 8) Umbral óptimo para F1 usando OOF
+#    - Usamos las probabilidades OOF de la clase positiva (lev[2] = "Pobre")
+# -------------------------------
+# En caret, la columna con prob. de la clase positiva tiene el nombre del nivel, p. ej. "Pobre"
+stopifnot("Pobre" %in% names(gbm_fit$pred))
+
+# -------------------------------
+# 8) Umbral óptimo para F1 usando OOF (con savePredictions = "final")
+# -------------------------------
+# Con savePredictions = "final", gbm_fit$pred ya es del mejor modelo.
+# Solo usamos la columna de prob. de la clase positiva ("Pobre").
+
+oof <- gbm_fit$pred
+
+# Si tu nivel positivo se llama exactamente "Pobre", la col prob se llama "Pobre":
+stopifnot("Pobre" %in% names(oof))
+
+thr_grid <- seq(0.01, 0.99, by = 0.01)
+f1_by_thr <- purrr::map_dfr(thr_grid, function(t) {
+  pred_cls <- ifelse(oof[["Pobre"]] >= t, "Pobre", "no_Pobre")
+  pred_cls <- factor(pred_cls, levels = levels(train_use$Pobre))
+  tp <- sum(pred_cls == "Pobre"    & oof$obs == "Pobre")
+  fp <- sum(pred_cls == "Pobre"    & oof$obs != "Pobre")
+  fn <- sum(pred_cls != "Pobre"    & oof$obs == "Pobre")
+  precision <- ifelse(tp + fp == 0, 0, tp / (tp + fp))
+  recall    <- ifelse(tp + fn == 0, 0, tp / (tp + fn))
+  F1        <- ifelse(precision + recall == 0, 0, 2 * precision * recall / (precision + recall))
+  tibble(threshold = t, precision = precision, recall = recall, F1 = F1)
+})
+
+best_thr   <- dplyr::arrange(f1_by_thr, dplyr::desc(F1)) %>% dplyr::slice(1)
+umbral_opt <- best_thr$threshold[1]
+print(best_thr)
+
+# -------------------------------
+# 9) Predicción en TEST y armado de submission
+# -------------------------------
+# Probabilidad de clase positiva "Pobre"
+test_prob <- predict(gbm_fit, newdata = test_final, type = "prob")[, "Pobre"]
+
+Pobre_pred <- as.integer(test_prob >= umbral_opt)  # 1 si Pobre, 0 si no_Pobre
+
+predicciones_hogaresGBM <- tibble(
+  id = as.character(test_final$id),
+  Pobre_pred = Pobre_pred
+)
+
+# Formato Kaggle: (id, Pobre) como enteros 0/1
+kaggle_sub <- predicciones_hogaresGBM %>%
+  transmute(
+    id    = id,
+    Pobre = as.integer(Pobre_pred)
+  )
+
+# -------------------------------
+# 10) Exportar CSV
+# -------------------------------
+nombre_archivoGBM <- paste0("GBM_F1_sub.csv")
+write_csv(kaggle_sub, here::here("stores", nombre_archivoGBM))
+
+message("Archivo guardado en: ", here::here("stores", nombre_archivoGBM))
+
 ```
 
+```{r}
+# MODELO GRADIENTE BOOSTING TREES  CON AJUSTES EN LOS HIPERPARÁMETROS 0.70
 
+# GBM (caret + gbm) — Clasificación, optimizando F1
+# - Etiquetas: "Pobre" (positivo) / "no_Pobre" (negativo)
+# - CV 5-fold, métrica = F1 (umbral óptimo con OOF)
+# - Imputación correcta
+
+set.seed(123)
+
+
+# 0) Variables base
+
+vars <- c(
+  "P5000","P5010","P5090","P5100","P5130","P5140",
+  "Nper","Npersug","Depto","Lp",
+  "mean_edu_occ","prop_occ_nper","prop_occ_pet","jefe_max_edu","horas_prom_occ",
+  "sexo_jefe","antig_jefe","antig_prom_occ","edu_prom_occ","prop_des",
+  "edad_jefe","edad_prom_occ","prestaciones","tam_emp_jefe","tam_emp_prom_occ",
+  "cotiza_pens_jefe","pos_ocup_jefe"
+)
+
+
+# 1) Derivadas en train/test
+
+train_hogares_enriquecido <- train_hogares %>%
+  mutate(
+    edad_jefe2       = edad_jefe^2,
+    edad_prom_occ2   = edad_prom_occ^2,
+    sexo_desocup     = sexo_jefe * prop_des,
+    edu_occ_lp       = mean_edu_occ * Lp,
+    horasxedu_occ    = horas_prom_occ * mean_edu_occ
+  )
+
+test_hogares_enriquecido <- test_hogares %>%
+  mutate(
+    edad_jefe2       = edad_jefe^2,
+    edad_prom_occ2   = edad_prom_occ^2,
+    sexo_desocup     = sexo_jefe * prop_des,
+    edu_occ_lp       = mean_edu_occ * Lp,
+    horasxedu_occ    = horas_prom_occ * mean_edu_occ
+  )
+
+# Añadir nuevas al vector
+vars <- c(vars, "edad_jefe2","edad_prom_occ2","sexo_desocup","edu_occ_lp","horasxedu_occ")
+
+
+# 2) Preparar conjuntos de modelado
+#    - Clase = 'Pobre' (factor con niveles no_Pobre/Pobre)
+#    - Seleccionar columnas necesarias
+
+train_hogares_enriquecido$Pobre <- factor(
+  train_hogares_enriquecido$Pobre,
+  levels = c(0, 1),
+  labels = c("no_Pobre", "Pobre")
+)
+
+train_use <- train_hogares_enriquecido %>%
+  select(id, Pobre, all_of(vars))
+
+test_final <- test_hogares_enriquecido %>%
+  select(id, all_of(vars))
+
+# -------------------------------
+# 3) Tipos (numéricas vs factores)
+
+
+# -------------------------------
+# 4) IMPUTACIÓN EXACTA 
+#    - Numéricas -> 0
+#    - cotiza_pens_jefe: NA -> "2" (No)
+#    - pos_ocup_jefe: agregar nivel "0" y enviar NA a "0"
+# -------------------------------
+
+# cotiza_pens_jefe: imputar NA a "2" (No)
+train_use$cotiza_pens_jefe[is.na(train_use$cotiza_pens_jefe)] <- "2"
+test_final$cotiza_pens_jefe[is.na(test_final$cotiza_pens_jefe)] <- "2"
+
+# ppos_ocup_jefe: crear nuevo nivel "0" y asignar a NA
+levels(train_use$pos_ocup_jefe) <- c(levels(train_use$pos_ocup_jefe), "0")
+levels(test_final$pos_ocup_jefe) <- c(levels(test_final$pos_ocup_jefe), "0")
+
+train_use$pos_ocup_jefe[is.na(train_use$pos_ocup_jefe)] <- "0"
+test_final$pos_ocup_jefe[is.na(test_final$pos_ocup_jefe)] <- "0"
+
+train_use <- droplevels(train_use)
+
+# Numéricas_0 -> 0
+for (v in vars) {
+  train_use[[v]][is.na(train_use[[v]])] <- 0
+  test_final[[v]][is.na(test_final[[v]])] <- 0
+}
+
+
+# -------------------------------
+# 5) Control de entrenamiento
+#    - CV 5-fold
+#    - Guardar predicciones OOF para optimizar umbral F1
+# -------------------------------
+ctrl <- trainControl(
+  method = "cv",
+  number = 5,
+  classProbs = TRUE,              # para probs de la clase positiva
+  savePredictions = "final",      # OOF para buscar umbral
+  summaryFunction = function(data, lev = NULL, model = NULL) {
+    # data$obs: factor real; data$pred: clase predicha (umbral 0.5); data[, lev[2]]: prob de clase positiva
+    # Métricas clásicas + F1 con corte 0.5 (caret evalúa así internamente)
+    # (El F1 definitivo lo optimizaremos con las OOF fuera de este summary)
+    tp <- sum(data$pred == lev[2] & data$obs == lev[2])
+    fp <- sum(data$pred == lev[2] & data$obs != lev[2])
+    fn <- sum(data$pred != lev[2] & data$obs == lev[2])
+    precision <- ifelse(tp + fp == 0, 0, tp / (tp + fp))
+    recall    <- ifelse(tp + fn == 0, 0, tp / (tp + fn))
+    F1        <- ifelse(precision + recall == 0, 0, 2 * precision * recall / (precision + recall))
+    c(Accuracy = mean(data$pred == data$obs), F1 = F1)
+  }
+)
+
+# -------------------------------
+# 6) Grid de hiperparámetros GBM
+# -------------------------------
+gbm_grid <- expand.grid(
+  n.trees = c(1500, 2000, 2500),
+  interaction.depth = c(3, 4),        # árboles pequeños–medianos
+  shrinkage = c(0.001, 0.01),
+  n.minobsinnode = c(10, 20)          # regulariza sin matar señal
+)
+
+
+# -------------------------------
+# 7) Entrenamiento GBM (clasificación)
+# -------------------------------
+formula_gbm <- as.formula(paste("Pobre ~", paste(vars, collapse = " + ")))
+
+gbm_fit <- train(
+  form = as.formula(paste("Pobre ~", paste(vars, collapse = " + "))),
+  data = train_use,
+  method = "gbm",
+  trControl = ctrl,           # tu trainControl con F1 y savePredictions="final"
+  metric = "F1",
+  tuneGrid = gbm_grid,
+  verbose = FALSE,
+  distribution = "bernoulli",
+  bag.fraction = 0.5
+)
+
+gbm_fit$bestTune
+min(gbm_fit$results$F1) # inspeccionar todo gbm_fit$results
+
+# -------------------------------
+# 8) Umbral óptimo para F1 usando OOF
+#    - Usamos las probabilidades OOF de la clase positiva (lev[2] = "Pobre")
+# -------------------------------
+# En caret, la columna con prob. de la clase positiva tiene el nombre del nivel, p. ej. "Pobre"
+stopifnot("Pobre" %in% names(gbm_fit$pred))
+
+# -------------------------------
+# 8) Umbral óptimo para F1 usando OOF (con savePredictions = "final")
+# -------------------------------
+# Con savePredictions = "final", gbm_fit$pred ya es del mejor modelo.
+# Solo usamos la columna de prob. de la clase positiva ("Pobre").
+
+oof <- gbm_fit$pred
+
+stopifnot("Pobre" %in% names(oof))
+
+thr_grid <- seq(0.01, 0.99, by = 0.01)
+f1_by_thr <- purrr::map_dfr(thr_grid, function(t) {
+  pred_cls <- ifelse(oof[["Pobre"]] >= t, "Pobre", "no_Pobre")
+  pred_cls <- factor(pred_cls, levels = levels(train_use$Pobre))
+  tp <- sum(pred_cls == "Pobre"    & oof$obs == "Pobre")
+  fp <- sum(pred_cls == "Pobre"    & oof$obs != "Pobre")
+  fn <- sum(pred_cls != "Pobre"    & oof$obs == "Pobre")
+  precision <- ifelse(tp + fp == 0, 0, tp / (tp + fp))
+  recall    <- ifelse(tp + fn == 0, 0, tp / (tp + fn))
+  F1        <- ifelse(precision + recall == 0, 0, 2 * precision * recall / (precision + recall))
+  tibble(threshold = t, precision = precision, recall = recall, F1 = F1)
+})
+
+best_thr   <- dplyr::arrange(f1_by_thr, dplyr::desc(F1)) %>% dplyr::slice(1)
+umbral_opt <- best_thr$threshold[1]
+print(best_thr)
+
+# -------------------------------
+# 9) Predicción en TEST y armado de submission
+# -------------------------------
+# Probabilidad de clase positiva "Pobre"
+test_prob <- predict(gbm_fit, newdata = test_final, type = "prob")[, "Pobre"]
+
+Pobre_pred <- as.integer(test_prob >= umbral_opt)  # 1 si Pobre, 0 si no_Pobre
+
+predicciones_hogaresGBM <- tibble(
+  id = as.character(test_final$id),
+  Pobre_pred = Pobre_pred
+)
+
+# Formato Kaggle: (id, Pobre) como enteros 0/1
+kaggle_sub <- predicciones_hogaresGBM %>%
+  transmute(
+    id    = id,
+    Pobre = as.integer(Pobre_pred)
+  )
+
+# -------------------------------
+# 10) Exportar CSV
+# -------------------------------
+nombre_archivoGBM <- paste0("GBM_F1_v2.csv")
+write_csv(kaggle_sub, here::here("stores", nombre_archivoGBM))
+
+message("Archivo guardado en: ", here::here("stores", nombre_archivoGBM))
+```
+
+```{r}
+# ==========================================================
+# GUARDADO ROBUSTO DE RESULTADOS GBM (clasificación)
+# Requiere en memoria: gbm_fit, gbm_grid, f1_by_thr, best_thr, umbral_opt,
+#                      kaggle_sub, predicciones_hogaresGBM, vars, ctrl
+# ==========================================================
+
+library(readr); library(dplyr); library(here); library(caret)
+
+# 1) Carpeta con timestamp
+run_stamp <- format(Sys.time(), "%Y%m%d_%H%M%S")
+out_dir   <- here::here("stores", paste0("GBM_run_", run_stamp))
+dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+
+# 2) Guardar el MODELO (RDS comprimido)
+saveRDS(gbm_fit, file = file.path(out_dir, "gbm_fit.rds"), compress = "xz")
+
+# 3) Guardar la GRID usada y el bestTune
+readr::write_csv(gbm_grid, file.path(out_dir, "tune_grid.csv"))
+readr::write_csv(as_tibble(gbm_fit$bestTune), file.path(out_dir, "best_tune.csv"))
+
+# 4) Resultados CV completos y métricas por combinación
+readr::write_csv(as_tibble(gbm_fit$results), file.path(out_dir, "cv_results.csv"))
+
+# 5) OOF (predicciones de validación cruzada del mejor modelo)
+#    Incluye: obs (verdadero), pred (clase 0.5), prob de la clase positiva "Pobre"
+oof <- gbm_fit$pred %>%
+  dplyr::select(rowIndex, obs, pred, Pobre)
+readr::write_csv(oof, file.path(out_dir, "oof_predictions.csv"))
+
+# 6) Umbral óptimo y curva F1(umbral)
+readr::write_csv(f1_by_thr, file.path(out_dir, "f1_by_threshold.csv"))
+readr::write_csv(as_tibble(best_thr), file.path(out_dir, "best_threshold_row.csv"))
+writeLines(as.character(umbral_opt), con = file.path(out_dir, "umbral_opt.txt"))
+
+# 7) Importancia de variables
+vi <- caret::varImp(gbm_fit)$importance %>%
+  tibble::rownames_to_column("variable") %>%
+  arrange(desc(Overall))
+readr::write_csv(vi, file.path(out_dir, "variable_importance.csv"))
+
+# 8) Predicciones finales (test) y submission
+readr::write_csv(kaggle_sub, file.path(out_dir, "kaggle_submission.csv"))
+readr::write_csv(predicciones_hogaresGBM, file.path(out_dir, "test_predictions_binary.csv"))
+
+# 9) Metadatos útiles (configuración del run)
+meta <- list(
+  timestamp = run_stamp,
+  formula   = as.character(gbm_fit$terms),
+  vars      = vars,
+  ctrl      = ctrl[c("method","number","classProbs","savePredictions","sampling")],
+  distribution = "bernoulli",
+  bag.fraction = 0.5,
+  keep.data    = FALSE,
+  metric       = "F1",
+  levels       = levels(train_use$Pobre)
+)
+saveRDS(meta, file = file.path(out_dir, "meta_config.rds"), compress = "xz")
+
+# 10) Opcional: sesión para reproducibilidad
+sink(file.path(out_dir, "sessionInfo.txt")); print(sessionInfo()); sink()
+
+message("✅ Todo guardado en: ", out_dir)
+
+```
+
+```{r}
+# MODELO GRADIENTE BOOSTING TREES  CON AJUSTES EN LOS HIPERPARÁMETROS y balancenado con up
+# ESTE APENAS ESTÁ EN CONSTRUCCION
+
+# GBM (caret + gbm) — Clasificación, optimizando F1
+# - Etiquetas: "Pobre" (positivo) / "no_Pobre" (negativo)
+# - CV 5-fold, métrica = F1 (umbral óptimo con OOF)
+# - Imputación correcta
+
+set.seed(123)
+
+
+# 0) Variables base
+
+vars <- c(
+  "P5000","P5010","P5090","P5100","P5130","P5140",
+  "Nper","Npersug","Depto","Lp",
+  "mean_edu_occ","prop_occ_nper","prop_occ_pet","jefe_max_edu","horas_prom_occ",
+  "sexo_jefe","antig_jefe","antig_prom_occ","edu_prom_occ","prop_des",
+  "edad_jefe","edad_prom_occ","prestaciones","tam_emp_jefe","tam_emp_prom_occ",
+  "cotiza_pens_jefe","pos_ocup_jefe"
+)
+
+
+# 1) Derivadas en train/test
+
+train_hogares_enriquecido <- train_hogares %>%
+  mutate(
+    edad_jefe2       = edad_jefe^2,
+    edad_prom_occ2   = edad_prom_occ^2,
+    sexo_desocup     = sexo_jefe * prop_des,
+    edu_occ_lp       = mean_edu_occ * Lp,
+    horasxedu_occ    = horas_prom_occ * mean_edu_occ
+  )
+
+test_hogares_enriquecido <- test_hogares %>%
+  mutate(
+    edad_jefe2       = edad_jefe^2,
+    edad_prom_occ2   = edad_prom_occ^2,
+    sexo_desocup     = sexo_jefe * prop_des,
+    edu_occ_lp       = mean_edu_occ * Lp,
+    horasxedu_occ    = horas_prom_occ * mean_edu_occ
+  )
+
+# Añadir nuevas al vector
+vars <- c(vars, "edad_jefe2","edad_prom_occ2","sexo_desocup","edu_occ_lp","horasxedu_occ")
+
+
+# 2) Preparar conjuntos de modelado
+#    - Clase = 'Pobre' (factor con niveles no_Pobre/Pobre)
+#    - Seleccionar columnas necesarias
+
+train_hogares_enriquecido$Pobre <- factor(
+  train_hogares_enriquecido$Pobre,
+  levels = c(0, 1),
+  labels = c("no_Pobre", "Pobre")
+)
+
+train_use <- train_hogares_enriquecido %>%
+  select(id, Pobre, all_of(vars))
+
+test_final <- test_hogares_enriquecido %>%
+  select(id, all_of(vars))
+
+# -------------------------------
+# 3) Tipos (numéricas vs factores)
+
+
+# -------------------------------
+# 4) IMPUTACIÓN EXACTA
+#    - Numéricas -> 0
+#    - cotiza_pens_jefe: NA -> "2" (No)
+#    - pos_ocup_jefe: agregar nivel "0" y enviar NA a "0"
+# -------------------------------
+
+# cotiza_pens_jefe: imputar NA a "2" (No)
+train_use$cotiza_pens_jefe[is.na(train_use$cotiza_pens_jefe)] <- "2"
+test_final$cotiza_pens_jefe[is.na(test_final$cotiza_pens_jefe)] <- "2"
+
+# ppos_ocup_jefe: crear nuevo nivel "0" y asignar a NA
+levels(train_use$pos_ocup_jefe) <- c(levels(train_use$pos_ocup_jefe), "0")
+levels(test_final$pos_ocup_jefe) <- c(levels(test_final$pos_ocup_jefe), "0")
+
+train_use$pos_ocup_jefe[is.na(train_use$pos_ocup_jefe)] <- "0"
+test_final$pos_ocup_jefe[is.na(test_final$pos_ocup_jefe)] <- "0"
+
+train_use <- droplevels(train_use)
+
+# Numéricas_0 -> 0
+for (v in vars) {
+  train_use[[v]][is.na(train_use[[v]])] <- 0
+  test_final[[v]][is.na(test_final[[v]])] <- 0
+}
+
+
+# -------------------------------
+# 5) Control de entrenamiento
+#    - CV 5-fold
+#    - Guardar predicciones OOF para optimizar umbral F1
+# -------------------------------
+ctrl <- trainControl(
+  method = "cv",
+  number = 5,
+  classProbs = TRUE,           # para probs de la clase positiva
+  savePredictions = "final",   # OOF para buscar umbral
+  sampling = "up",             # <-- balanceo: sobre-muestreo de la clase minoritaria
+  summaryFunction = function(data, lev = NULL, model = NULL) {
+    tp <- sum(data$pred == lev[2] & data$obs == lev[2])
+    fp <- sum(data$pred == lev[2] & data$obs != lev[2])
+    fn <- sum(data$pred != lev[2] & data$obs == lev[2])
+    precision <- ifelse(tp + fp == 0, 0, tp / (tp + fp))
+    recall    <- ifelse(tp + fn == 0, 0, tp / (tp + fn))
+    F1        <- ifelse(precision + recall == 0, 0, 2 * precision * recall / (precision + recall))
+    c(Accuracy = mean(data$pred == data$obs), F1 = F1)
+  }
+  , verboseIter = TRUE        # (opcional) para ver progreso en consola
+)
+
+
+# -------------------------------
+# 6) Grid de hiperparámetros GBM
+# -------------------------------
+gbm_grid <- expand.grid(
+  n.trees = c(500, 1000),
+  interaction.depth = c(3, 4),        # árboles pequeños–medianos
+  shrinkage = c(0.005, 0.01),
+  n.minobsinnode = c(10, 20)          # regulariza sin matar señal
+)
+
+
+# -------------------------------
+# 7) Entrenamiento GBM (clasificación)
+# -------------------------------
+formula_gbm <- as.formula(paste("Pobre ~", paste(vars, collapse = " + ")))
+
+gbm_fit <- train(
+  form = as.formula(paste("Pobre ~", paste(vars, collapse = " + "))),
+  data = train_use,
+  method = "gbm",
+  trControl = ctrl,           # tu trainControl con F1 y savePredictions="final"
+  metric = "F1",
+  tuneGrid = gbm_grid,
+  verbose = TRUE,
+  distribution = "bernoulli",
+  bag.fraction = 0.5
+)
+
+gbm_fit$bestTune
+min(gbm_fit$results$F1) # inspeccionar todo gbm_fit$results
+
+# -------------------------------
+# 8) Umbral óptimo para F1 usando OOF
+#    - Usamos las probabilidades OOF de la clase positiva (lev[2] = "Pobre")
+# -------------------------------
+# En caret, la columna con prob. de la clase positiva tiene el nombre del nivel, p. ej. "Pobre"
+stopifnot("Pobre" %in% names(gbm_fit$pred))
+
+# -------------------------------
+# 8) Umbral óptimo para F1 usando OOF (con savePredictions = "final")
+# -------------------------------
+# Con savePredictions = "final", gbm_fit$pred ya es del mejor modelo.
+# Solo usamos la columna de prob. de la clase positiva ("Pobre").
+
+oof <- gbm_fit$pred
+
+stopifnot("Pobre" %in% names(oof))
+
+thr_grid <- seq(0.01, 0.99, by = 0.01)
+f1_by_thr <- purrr::map_dfr(thr_grid, function(t) {
+  pred_cls <- ifelse(oof[["Pobre"]] >= t, "Pobre", "no_Pobre")
+  pred_cls <- factor(pred_cls, levels = levels(train_use$Pobre))
+  tp <- sum(pred_cls == "Pobre"    & oof$obs == "Pobre")
+  fp <- sum(pred_cls == "Pobre"    & oof$obs != "Pobre")
+  fn <- sum(pred_cls != "Pobre"    & oof$obs == "Pobre")
+  precision <- ifelse(tp + fp == 0, 0, tp / (tp + fp))
+  recall    <- ifelse(tp + fn == 0, 0, tp / (tp + fn))
+  F1        <- ifelse(precision + recall == 0, 0, 2 * precision * recall / (precision + recall))
+  tibble(threshold = t, precision = precision, recall = recall, F1 = F1)
+})
+
+best_thr   <- dplyr::arrange(f1_by_thr, dplyr::desc(F1)) %>% dplyr::slice(1)
+umbral_opt <- best_thr$threshold[1]
+print(best_thr)
+
+# -------------------------------
+# 9) Predicción en TEST y armado de submission
+# -------------------------------
+# Probabilidad de clase positiva "Pobre"
+test_prob <- predict(gbm_fit, newdata = test_final, type = "prob")[, "Pobre"]
+
+Pobre_pred <- as.integer(test_prob >= umbral_opt)  # 1 si Pobre, 0 si no_Pobre
+
+predicciones_hogaresGBM <- tibble(
+  id = as.character(test_final$id),
+  Pobre_pred = Pobre_pred
+)
+
+# Formato Kaggle: (id, Pobre) como enteros 0/1
+kaggle_sub <- predicciones_hogaresGBM %>%
+  transmute(
+    id    = id,
+    Pobre = as.integer(Pobre_pred)
+  )
+
+# -------------------------------
+# 10) Exportar CSV
+# -------------------------------
+nombre_archivoGBM <- paste0("GBM_F1_v2.csv")
+write_csv(kaggle_sub, here::here("stores", nombre_archivoGBM))
+
+message("Archivo guardado en: ", here::here("stores", nombre_archivoGBM))
+```
 
 
 

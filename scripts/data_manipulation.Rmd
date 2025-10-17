@@ -27,8 +27,7 @@ p_load(rio, # Import/export data.
        scales,
        car,
        dplyr,
-       tidyr,
-       plurrr
+       tidyr
        )
 ```
 
@@ -287,6 +286,11 @@ write_csv(df_train_hogares, here::here("stores", "train_hogares_enriquecido_2.cs
 write_csv(df_test_hogares,  here::here("stores", "test_hogares_enriquecido_2.csv"))
 ```
 
+```{r}
+skim(df_train_hogares)
+```
+
+
 
 ```{r}
 
@@ -322,10 +326,10 @@ Ya que comprobamos que la pobreza se calcula según el ingreso con arriendo impu
 ```{r}
 table(df_train_hogares$P5090, df_train_hogares$Pobre)
 prop.table(table(df_train_hogares$P5090, df_train_hogares$Pobre), 1)
-
-
-
-
 ```
+
+
+
+
 
 
