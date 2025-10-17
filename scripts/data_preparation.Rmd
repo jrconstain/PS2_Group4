@@ -1,0 +1,482 @@
+---
+title: "data_preparation"
+author: "G4"
+date: "2025-10-16"
+output: html_document
+---
+
+# Set-up
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(pacman)
+
+p_load(rio, # Import/export data.
+       tidyverse, # Tidy-data.
+       stargazer, # Descriptive statistics.
+       gt, # Descriptive statistics.
+       gtsummary,
+       caret, # For predictive model assessment.
+       gridExtra, # Arrange plots.
+       skimr, # Summarize data.
+       here, #for file searching
+       readr, #for opening files
+       ggplot2,
+       boot,
+       scales,
+       car,
+       dplyr,
+       tidyr,
+       plurrr
+       )
+```
+
+# Load Data
+
+```{r}
+# Load all 4 data archives
+
+ruta1 <- here("stores", "train_hogares.csv")
+df_train_hogares <- read_csv(ruta1)
+
+ruta2 <- here("stores", "train_personas.csv")
+df_train_personas <- read_csv(ruta2)
+
+ruta3 <- here("stores", "test_personas.csv")
+df_test_personas <- read_csv(ruta3)
+
+ruta4 <- here("stores", "test_hogares.csv")
+df_test_hogares <- read_csv(ruta4)
+
+```
+
+# Create new variables at individual level
+
+```{r}
+# Function to create years of education
+add_edu_years <- function(df) {
+  df$edu_years <- ifelse(
+    df$P6210 %in% c(1, 2, 9), 0, # None, Preschool, Unknown → 0
+    ifelse(
+      df$P6210 %in% c(3, 4, 5), df$P6210s1, # Primary or Secondary → as is
+      ifelse(df$P6210 == 6, df$P6210s1 + 11, NA_real_) # Tertiary → add 11
+    )
+  )
+  df
+}
+
+
+# Function to create years of experience (Mincer-style proxy)
+# exp = age - edu_years - 6
+add_experience <- function(df) {
+  df$exp <- df$P6040 - df$edu_years - 6
+  df
+}
+
+# Function to Manage NA's on labor indicators
+fill_labor_nas <- function(df) {
+  vars <- c("Pet", "Oc", "Des", "Ina")
+  df %>%
+    mutate(across(all_of(vars), ~ as.integer(replace(., is.na(.), 0L))))
+}
+
+# Define PET_flexible (Urbano: 15–64 años; Rural: 12–69 años)
+add_pet_flexible <- function(df) {
+  df$PET_flexible <- ifelse(
+    is.na(df$P6040), NA_integer_,
+    ifelse(
+      df$Clase == 1,                           # Urbano
+      ifelse(df$P6040 >= 15 & df$P6040 <= 64, 1L, 0L),
+      ifelse(df$P6040 >= 12 & df$P6040 <= 69, 1L, 0L) # Rural
+    )
+  )
+  df
+}
+
+
+# Apply functiona to Train and Test
+df_train_personas <- add_edu_years(df_train_personas)
+df_test_personas  <- add_edu_years(df_test_personas)
+
+df_train_personas <- add_experience(df_train_personas)
+df_test_personas  <- add_experience(df_test_personas)
+
+df_train_personas <- fill_labor_nas(df_train_personas)
+df_test_personas  <- fill_labor_nas(df_test_personas)
+
+df_train_personas <- add_pet_flexible(df_train_personas)
+df_test_personas  <- add_pet_flexible(df_test_personas)
+
+```
+
+
+# Agreggate variables to household level
+
+```{r}
+# Function to add variables to household from the individual level
+agg_personas_to_hogares <- function(df_personas) {
+  df_personas %>%
+    group_by(id) %>%
+    summarise(
+      # Bases para proporciones
+      n_personas     = n(),
+      n_occ          = sum(Oc == 1, na.rm = TRUE),
+      n_pet          = sum(Pet == 1, na.rm = TRUE),
+
+      # 1) Promedio de años de educación entre ocupados (Oc==1)
+      mean_edu_occ   = mean(edu_years[Oc == 1], na.rm = TRUE),
+
+      # 2) Proporción: Ocupados / número de personas en el hogar
+      prop_occ_nper  = n_occ / n_personas,
+
+      # 3) Proporción: Ocupados / total # PET (PET==1)
+      prop_occ_pet   = n_occ / n_pet,
+
+      # 4) Máx nivel educativo del jefe del hogar (P6050==1)
+      jefe_max_edu   = max(P6210[P6050 == 1], na.rm = TRUE),
+
+      # 5) Años de edu promedio de los Oc==1
+      mean_edu_occ   = mean(edu_years[Oc == 1], na.rm = TRUE),
+
+      # 6) Proporción de los Des (= 1 - Prop Oc/nper)
+      prop_des       = 1 - (n_occ / n_personas),
+
+      # 7) Edad del Jefe del hogar
+      edad_jefe      = first(P6040[P6050 == 1]),
+
+      # 8) Edad promedio de los que trabajan (Oc==1)
+      edad_prom_occ  = mean(P6040[Oc == 1], na.rm = TRUE),
+
+      # 9) prestaciones = 1 si cualquiera de los ítems es "sí" (==1)
+      prestaciones   = as.integer(
+        any(P6510 == 1, na.rm = TRUE) |
+        any(P6545 == 1, na.rm = TRUE) |
+        any(P6580 == 1, na.rm = TRUE) |
+        any(P6630s1 == 1, na.rm = TRUE) |
+        any(P6630s2 == 1, na.rm = TRUE) |
+        any(P6630s3 == 1, na.rm = TRUE) |
+        any(P6630s4 == 1, na.rm = TRUE) |
+        any(P6630s6 == 1, na.rm = TRUE)
+      ),
+
+      # 10) P6800 Horas usuales por semana en el trabajo principal (promedio entre Oc==1)
+      horas_prom_occ = mean(P6800[Oc == 1], na.rm = TRUE),
+
+      # 11) P6870 Tamaño empresa/negocio del Jefe
+      tam_emp_jefe   = first(P6870[P6050 == 1]),
+
+      # 12) P6870 Tamaño empresa/negocio promedio entre Oc==1
+      tam_emp_prom_occ = mean(P6870[Oc == 1], na.rm = TRUE),
+
+      # 13) P6920 ¿Cotiza a pensiones? del Jefe
+      cotiza_pens_jefe = first(P6920[P6050 == 1]),
+
+      # 14) P6430 Posición ocupacional del Jefe
+      pos_ocup_jefe  = first(P6430[P6050 == 1]),
+      
+      # 15) Promedio horas de trabajo por semana (P6800) entre Oc==1
+      prom_horas_occ = mean(P6800[Oc == 1], na.rm = TRUE),
+
+      # 2 extras útiles que pediste arriba:
+      # Sexo del jefe (P6020) y Antigüedad P6426 (jefe y promedio Oc==1)
+      sexo_jefe      = first(P6020[P6050 == 1]),
+      antig_jefe     = first(P6426[P6050 == 1]),
+      antig_prom_occ = mean(P6426[Oc == 1], na.rm = TRUE),
+
+      .groups = "drop"
+    ) %>%
+    # Deja solo las columnas finales útiles (incluye bases si quieres auditarlas)
+    select(
+      id,
+      mean_edu_occ, prop_occ_nper, prop_occ_pet,
+      jefe_max_edu, mean_edu_occ, prop_des,
+      edad_jefe, edad_prom_occ, prestaciones,
+      horas_prom_occ, tam_emp_jefe, tam_emp_prom_occ,
+      cotiza_pens_jefe, pos_ocup_jefe,
+      sexo_jefe, antig_jefe, antig_prom_occ, prom_horas_occ
+    )
+}
+
+```
+
+```{r}
+# Aplicar al TRAIN: personas -> hogares
+train_agg <- agg_personas_to_hogares_plus(df_train_personas)
+df_train_hogares <- df_train_hogares %>% left_join(train_agg, by = "id")
+
+# Aplicar al TEST: personas -> hogares
+test_agg <- agg_personas_to_hogares_plus(df_test_personas)
+df_test_hogares  <- df_test_hogares  %>% left_join(test_agg,  by = "id")
+```
+
+```{r}
+# Guardar datasets enriquecidos en "stores/"
+write_csv(df_train_hogares, here::here("stores", "train_hogares_enriquecido_2.csv"))
+write_csv(df_test_hogares,  here::here("stores", "test_hogares_enriquecido_2.csv"))
+```
+
+
+```{r}
+agg_personas_to_hogares_plus_2 <- function(df_personas) {
+
+  # Helpers para robustez numérica
+  safe_div <- function(a, b) ifelse(is.na(b) | b <= 0, 0, a / b)
+
+  df_personas %>%
+    group_by(id) %>%
+    summarise(
+      # ===== BASE DE CONTEOS ===================================================
+      n_personas = n(),
+      n_occ      = sum(Oc  == 1, na.rm = TRUE),
+      n_des      = sum(Des == 1, na.rm = TRUE),
+      n_ina      = sum(Ina == 1, na.rm = TRUE),
+      n_pet      = sum(Pet == 1, na.rm = TRUE),
+
+      # ===== PET flexible ===
+      n_pet_flex        = sum(PET_flexible == 1, na.rm = TRUE),
+      n_no_pet_flex     = n_personas - n_pet_flex,
+      n_occ_in_pet_flex = sum(Oc == 1 & PET_flexible == 1, na.rm = TRUE),
+      
+
+      # ===== COMPOSICIÓN / PROPORCIONES (LEGADO + NUEVAS) =====================
+      prop_occ_nper     = safe_div(n_occ, n_personas),
+      prop_des_nper     = safe_div(n_des, n_personas),         # NUEVA
+      prop_ina_nper     = safe_div(n_ina, n_personas),         # NUEVA
+      prop_no_pet_nper  = safe_div(n_no_pet_flex, n_personas), # NUEVA (PET flexible)
+      prop_occ_pet      = safe_div(n_occ, n_pet),              # LEGADO (PET original)
+      prop_occ_pet_flex = safe_div(n_occ_in_pet_flex, n_pet_flex), # NUEVA (PET flexible)
+
+      # ===== JEFE DEL HOGAR: CARACTERÍSTICAS ==================================
+      edad_jefe       = dplyr::first(P6040[P6050 == 1]),
+      sexo_jefe       = dplyr::first(P6020[P6050 == 1]),
+      tam_emp_jefe    = dplyr::coalesce(dplyr::first(P6870[P6050 == 1]), 0),
+      cotiza_pens_jefe= dplyr::coalesce(dplyr::first(P6920[P6050 == 1]), 0),
+      pos_ocup_jefe   = dplyr::coalesce(dplyr::first(P6430[P6050 == 1]), 0),
+      antig_jefe      = dplyr::coalesce(dplyr::first(P6426[P6050 == 1]), 0), # si NA -> 0
+      jefe_max_edu    = max(P6210[P6050 == 1], na.rm = TRUE),  # LEGADO (cód. educ. máx.)
+      jefe_max_edu_years = ifelse(any(P6050 == 1),
+                                  max(edu_years[P6050 == 1], na.rm = TRUE),
+                                  NA_real_),                   # NUEVA (años)
+
+      # Indicadores del jefe
+      jefe_ocupado     = as.integer(any(P6050 == 1 & Oc == 1, na.rm = TRUE)),
+      prestaciones_jefe= as.integer(any(P6050 == 1 &
+                                  (P6510 == 1 | P6545 == 1 | P6580 == 1 |
+                                   P6630s1 == 1 | P6630s2 == 1 | P6630s3 == 1 |
+                                   P6630s4 == 1 | P6630s6 == 1),
+                                  na.rm = TRUE)),
+      horas_jefe       = ifelse(any(P6050 == 1 & Oc == 1, na.rm = TRUE),
+                                dplyr::first(P6800[P6050 == 1 & Oc == 1]), 0),
+
+      # ===== CALIDAD DEL EMPLEO (HOGAR) =======================================
+      prestaciones = as.integer(
+        any(P6510 == 1, na.rm = TRUE) |
+        any(P6545 == 1, na.rm = TRUE) |
+        any(P6580 == 1, na.rm = TRUE) |
+        any(P6630s1 == 1, na.rm = TRUE) |
+        any(P6630s2 == 1, na.rm = TRUE) |
+        any(P6630s3 == 1, na.rm = TRUE) |
+        any(P6630s4 == 1, na.rm = TRUE) |
+        any(P6630s6 == 1, na.rm = TRUE)   # (prioriza versión LEGADA)
+      ),
+      
+      prop_prest_occ = if (n_occ > 0) { 
+        mean( 
+          (P6510 == 1 | P6545 == 1 | P6580 == 1 | P6630s1 == 1 | P6630s2 == 1 | P6630s3 == 1 | P6630s4 == 1 | P6630s6 == 1)[Oc == 1], 
+          na.rm = TRUE 
+          ) 
+        } else 0,
+
+      # ===== HORAS Y TAMAÑOS (ENTRE OCUPADOS) =================================
+      prom_horas_occ  = ifelse(n_occ > 0, mean(P6800[Oc == 1], na.rm = TRUE), 0), # alias LEGADO
+      tam_emp_prom_occ= ifelse(n_occ > 0, mean(P6870[Oc == 1], na.rm = TRUE), 0),
+
+      # ===== ANTIGÜEDAD / EDUCACIÓN / EDAD (ENTRE OCUPADOS) ===================
+      antig_prom_occ  = ifelse(n_occ > 0, mean(P6426[Oc == 1], na.rm = TRUE), 0),
+      mean_edu_occ    = ifelse(n_occ > 0, mean(edu_years[Oc == 1], na.rm = TRUE), 0),
+      edad_prom_occ   = ifelse(n_occ > 0, mean(P6040[Oc == 1], na.rm = TRUE), 0),
+
+      # ===== SEGUNDO TRABAJO ===================================================
+      segundo_trabajo_hogar   = as.integer(any(P7040 == 1, na.rm = TRUE)),
+      horas_segundo_trabajo_prom = ifelse(any(P7040 == 1, na.rm = TRUE),
+                                          mean(P7045[P7040 == 1], na.rm = TRUE), 0),
+
+      # ===== DESOCUPACIÓN CON INGRESOS (CLASIFICACIÓN) ========================
+      n_desoc_con_ingresos   = sum(Des == 1 & (P7422 == 1 | P7472 == 1), na.rm = TRUE),
+      desoc_con_ingresos_cat = dplyr::case_when(
+        n_des == 0 ~ "sin_desocupados",
+        n_des > 0 & n_desoc_con_ingresos > 0 ~ "desoc_con_ingresos",
+        n_des > 0 & n_desoc_con_ingresos == 0 ~ "desoc_sin_ingresos",
+        TRUE ~ "sin_desocupados"
+      ),
+
+      # ===== TRABAJO INFANTIL / MAYORES (AGREGADO HOGAR) ======================
+      has_child_work_no_study = any(Clase == 1 & P6040 >= 10 & P6040 <= 14 &
+                                    Oc == 1 & P6240 != 3, na.rm = TRUE),
+      has_child_work_study    = any(Clase == 1 & P6040 >= 10 & P6040 <= 14 &
+                                    Oc == 1 & P6240 == 3, na.rm = TRUE),
+      child_work_cat_chr = dplyr::case_when(
+        has_child_work_no_study ~ "work_no_study",
+        has_child_work_study    ~ "work_study",
+        TRUE ~ "none"
+      ),
+      has_senior_calificado   = any(P6040 >= 65 & Oc == 1 & edu_years >= 16, na.rm = TRUE),
+      has_senior_no_cal       = any(P6040 >= 65 & Oc == 1 & edu_years < 16, na.rm = TRUE),
+      senior_work_cat_chr = dplyr::case_when(
+        has_senior_calificado ~ "calificado",
+        has_senior_no_cal     ~ "no_calificado",
+        TRUE ~ "none"
+      ),
+
+      # ===== INGRESOS NO LABORALES (INDICADORES) ===============================
+      ingreso_por_activos = as.integer(any(P7495 == 1 | P7500s2 == 1 | P7510s5 == 1, na.rm = TRUE)),
+      ingreso_otros       = as.integer(any(P7505 == 1 | P7510s7 == 1, na.rm = TRUE)),
+      ingreso_ayudas      = as.integer(any(P7510s1 == 1 | P7510s2 == 1 | P7510s3 == 1 |
+                                           P7500s3 == 1 | P7510s7 == 1, na.rm = TRUE)),
+
+      .groups = "drop"
+    ) %>%
+    mutate(
+      # ===== FACTORES CON NIVELES EXPLÍCITOS ==================================
+      desoc_con_ingresos_cat = factor(desoc_con_ingresos_cat_chr,
+                                      levels = c("sin_desocupados", "desoc_con_ingresos", "desoc_sin_ingresos")),
+      child_work_cat  = factor(child_work_cat_chr,
+                               levels = c("none", "work_study", "work_no_study")),
+      senior_work_cat = factor(senior_work_cat_chr,
+                               levels = c("none", "calificado", "no_calificado"))
+    ) %>%
+    # ===== ORDEN FINAL DE COLUMNAS ============================================
+    dplyr::select(
+      # ID
+      id,
+      # Conteos
+      n_personas, n_occ, n_des, n_ina, n_pet,
+      n_pet_flex, n_no_pet_flex, n_occ_in_pet_flex,
+      # Composición
+      prop_occ_nper, prop_des_nper, prop_ina_nper,
+      prop_no_pet_nper, prop_occ_pet, prop_occ_pet_flex,
+      # Jefe del hogar
+      edad_jefe, sexo_jefe, tam_emp_jefe, cotiza_pens_jefe, pos_ocup_jefe,
+      antig_jefe, jefe_max_edu, jefe_max_edu_years, jefe_ocupado,
+      prestaciones_jefe, horas_jefe,
+      # Calidad del empleo
+      prestaciones, prop_prest_occ,
+      # Ocupados: horas, tamaño, antigüedad, educación y edad
+      prom_horas_occ, tam_emp_prom_occ, antig_prom_occ, mean_edu_occ, edad_prom_occ,
+      # Segundo trabajo
+      segundo_trabajo_hogar, horas_segundo_trabajo_prom,
+      # Desocupación
+      n_desoc_con_ingresos, desoc_con_ingresos_cat,
+      # Trabajo infantil y mayores
+      child_work_cat, senior_work_cat,
+      # Ingresos no laborales
+      ingreso_por_activos, ingreso_otros, ingreso_ayudas
+    )
+}
+
+```
+
+
+```{r}
+# ============================================================
+# Variables base (las nuevas + básicas de hogar)
+# ============================================================
+
+vars <- c(
+  "P5000","P5010","P5090","P5100","P5130","P5140",
+  "Nper","Npersug","Depto","Lp",
+  # variables de personas a nivel hogar
+  "mean_edu_occ","prop_occ_nper","prop_occ_pet","jefe_max_edu","horas_prom_occ",
+  "sexo_jefe","antig_jefe","antig_prom_occ","edu_prom_occ","prop_des",
+  "edad_jefe","edad_prom_occ","prestaciones","tam_emp_jefe","tam_emp_prom_occ",
+  "cotiza_pens_jefe","pos_ocup_jefe"
+)
+
+# ============================================================
+# Limpieza de duplicados después de los joins
+# ============================================================
+
+train_hogares_enriquecido <- train_hogares_enriquecido %>%
+  select(-ends_with(".x"), -ends_with(".y")) %>%
+  distinct(id, .keep_all = TRUE)
+
+test_hogares_enriquecido <- test_hogares_enriquecido %>%
+  select(-ends_with(".x"), -ends_with(".y")) %>%
+  distinct(id, .keep_all = TRUE)
+
+# ============================================================
+# Creación de interacciones y transformaciones
+# ============================================================
+
+train_hogares_enriquecido <- train_hogares_enriquecido %>%
+  mutate(
+    # ---- Potencias (efectos no lineales) ----
+    edad_jefe2       = edad_jefe^2,
+    edad_prom_occ2   = edad_prom_occ^2,
+
+    # ---- Interacciones originales ----
+    sexo_desocup     = sexo_jefe * prop_des,
+    edu_occ_lp       = mean_edu_occ * Lp,
+    horasxedu_occ    = horas_prom_occ * mean_edu_occ,
+    horasxpropocc    = horas_prom_occ * prop_occ_nper,
+
+    # ---- Nuevas interacciones principales ----
+    meanedu_x_propocc = mean_edu_occ * prop_occ_nper,
+    meanedu_x_lp      = mean_edu_occ * Lp,
+    propocc_x_lp      = prop_occ_nper * Lp,
+    propocc_x_prest   = prop_occ_nper * prop_prest_occ
+  )
+
+# ---- Replicar mutaciones para test ----
+test_hogares_enriquecido <- test_hogares_enriquecido %>%
+  mutate(
+    edad_jefe2       = edad_jefe^2,
+    edad_prom_occ2   = edad_prom_occ^2,
+    sexo_desocup     = sexo_jefe * prop_des,
+    edu_occ_lp       = mean_edu_occ * Lp,
+    horasxedu_occ    = horas_prom_occ * mean_edu_occ,
+    horasxpropocc    = horas_prom_occ * prop_occ_nper,
+    meanedu_x_propocc = mean_edu_occ * prop_occ_nper,
+    meanedu_x_lp      = mean_edu_occ * Lp,
+    propocc_x_lp      = prop_occ_nper * Lp,
+    propocc_x_prest   = prop_occ_nper * prop_prest_occ
+  )
+
+# ============================================================
+# Añadir nuevas al vector de variables
+# ============================================================
+
+vars <- c(
+  vars,
+  "edad_jefe2","edad_prom_occ2","sexo_desocup",
+  "edu_occ_lp","horasxedu_occ",
+  "meanedu_x_propocc","meanedu_x_lp","propocc_x_lp","propocc_x_prest"
+)
+
+# ============================================================
+# Armar train/test finales para modelado
+# ============================================================
+
+train_use <- train_hogares_enriquecido %>%
+  select(Pobre, all_of(vars)) %>%
+  mutate(Pobre = factor(Pobre, levels = c(0,1), labels = c("no_pobre","pobre")))
+
+test_final <- test_hogares_enriquecido %>%
+  select(all_of(vars))
+
+# ============================================================
+# Definir categóricas y numéricas
+# ============================================================
+
+cat_vars <- c("Depto","P5090","pos_ocup_jefe","cotiza_pens_jefe")
+num_vars <- setdiff(vars, cat_vars)
+
+train_use[cat_vars]  <- lapply(train_use[cat_vars],  factor)
+test_final[cat_vars] <- lapply(test_final[cat_vars], as.character)
+
+
+
+```
