@@ -293,14 +293,42 @@ test_hogares_enriquecido  <- df_test_hogares  %>% left_join(test_agg,  by = "id"
 # ============================================================
 
 vars <- c(
+  # ---- Variables base del hogar ----
   "P5000","P5010","P5090","P5100","P5130","P5140",
   "Nper","Npersug","Depto","Lp",
-  # variables de personas a nivel hogar
-  "mean_edu_occ","prop_occ_nper","prop_occ_pet","jefe_max_edu","horas_prom_occ",
-  "sexo_jefe","antig_jefe","antig_prom_occ","edu_prom_occ","prop_des",
-  "edad_jefe","edad_prom_occ","prestaciones","tam_emp_jefe","tam_emp_prom_occ",
-  "cotiza_pens_jefe","pos_ocup_jefe"
-)
+  
+  # ---- Conteos ----
+  "n_personas","n_occ","n_des","n_ina","n_pet",
+  "n_pet_flex","n_no_pet_flex","n_occ_in_pet_flex",
+  
+  # ---- Composición ----
+  "prop_occ_nper","prop_des_nper","prop_ina_nper",
+  "prop_no_pet_nper","prop_occ_pet","prop_occ_pet_flex",
+  
+  # ---- Jefe del hogar ----
+  "edad_jefe","sexo_jefe","tam_emp_jefe","cotiza_pens_jefe",
+  "pos_ocup_jefe","antig_jefe","jefe_max_edu",
+  "jefe_max_edu_years","jefe_ocupado",
+  "prestaciones_jefe","horas_jefe",
+  
+  # ---- Calidad del empleo ----
+  "prestaciones","prop_prest_occ",
+  
+  # ---- Ocupados (promedios del hogar) ----
+  "prom_horas_occ","tam_emp_prom_occ","antig_prom_occ",
+  "mean_edu_occ","edad_prom_occ",
+  
+  # ---- Segundo trabajo ----
+  "segundo_trabajo_hogar","horas_segundo_trabajo_prom",
+  
+  # ---- Desocupación ----
+  "n_desoc_con_ingresos","desoc_con_ingresos_cat",
+  
+  # ---- Trabajo infantil y mayores ----
+  "child_work_cat","senior_work_cat",
+  
+  # ---- Ingresos no laborales ----
+  "ingreso_por_activos","ingreso_otros","ingreso_ayudas")
 
 # ============================================================
 # Limpieza de duplicados después de los joins
@@ -325,10 +353,10 @@ train_hogares_enriquecido <- train_hogares_enriquecido %>%
     edad_prom_occ2   = edad_prom_occ^2,
 
     # ---- Interacciones originales ----
-    sexo_desocup     = sexo_jefe * prop_des,
+    sexo_desocup     = sexo_jefe * prop_des_nper,
     edu_occ_lp       = mean_edu_occ * Lp,
-    horasxedu_occ    = horas_prom_occ * mean_edu_occ,
-    horasxpropocc    = horas_prom_occ * prop_occ_nper,
+    horasxedu_occ    = prom_horas_occ * mean_edu_occ,
+    horasxpropocc    = prom_horas_occ * prop_occ_nper,
 
     # ---- Nuevas interacciones principales ----
     meanedu_x_propocc = mean_edu_occ * prop_occ_nper,
@@ -341,10 +369,10 @@ test_hogares_enriquecido <- test_hogares_enriquecido %>%
   mutate(
     edad_jefe2       = edad_jefe^2,
     edad_prom_occ2   = edad_prom_occ^2,
-    sexo_desocup     = sexo_jefe * prop_des,
+    sexo_desocup     = sexo_jefe * prop_des_nper,
     edu_occ_lp       = mean_edu_occ * Lp,
-    horasxedu_occ    = horas_prom_occ * mean_edu_occ,
-    horasxpropocc    = horas_prom_occ * prop_occ_nper,
+    horasxedu_occ    = prom_horas_occ * mean_edu_occ,
+    horasxpropocc    = prom_horas_occ * prop_occ_nper,
     meanedu_x_propocc = mean_edu_occ * prop_occ_nper,
     propocc_x_lp      = prop_occ_nper * Lp,
     propocc_x_prest   = prop_occ_nper * prop_prest_occ
@@ -357,7 +385,7 @@ test_hogares_enriquecido <- test_hogares_enriquecido %>%
 vars <- c(
   vars,
   "edad_jefe2","edad_prom_occ2","sexo_desocup",
-  "edu_occ_lp","horasxedu_occ",
+  "edu_occ_lp","horasxedu_occ", "horasxpropocc",
   "meanedu_x_propocc","propocc_x_lp","propocc_x_prest"
 )
 
@@ -378,7 +406,7 @@ test_final <- test_hogares_enriquecido %>%
 
 # Categóricas
 cat_vars <- c(
-  "Depto","P5000","P5010","P5090","P5100","P5130","P5140",
+  "Depto","P5000","P5010","P5090",
   "sexo_jefe","pos_ocup_jefe","cotiza_pens_jefe","jefe_max_edu",
   "child_work_cat","senior_work_cat","desoc_con_ingresos_cat"
 )
@@ -389,6 +417,12 @@ num_vars <- setdiff(vars, cat_vars)
 # ---- Convertir tipo adecuadamente ----
 train_use[cat_vars]  <- lapply(train_use[cat_vars],  factor)
 test_final[cat_vars] <- lapply(test_final[cat_vars], as.character)
+
+# ---- Forzar conversión a numérico (maneja factors o caracteres)
+for (v in c("P5100","P5130","P5140")) {
+  train_use[[v]] <- as.numeric(as.character(train_use[[v]]))
+  test_final[[v]] <- as.numeric(as.character(test_final[[v]]))
+}
 
 # ============================================================
 # IMPUTACIÓN
