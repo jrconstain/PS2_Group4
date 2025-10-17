@@ -30,7 +30,8 @@ p_load(rio, # Import/export data.
        tidyr,
        MLmetrics, 
        glmnet,
-       pROC
+       pROC,
+       rpart
        )
 ```
 
@@ -327,8 +328,11 @@ write_csv(kaggle_sub, here::here("stores", nombre_archivoRF))
 
 
 ```{r}
-
-# Árbol de Clasificación (rpart2) optimizando F1 variables usadas por Juan José en EN
+# ================================================
+# Árbol de Clasificación (rpart2) optimizando F1
+# variables usadas por Juan José en EN + derivadas
+# Imputación específica solicitada
+# ================================================
 
 set.seed(123)
 
@@ -368,8 +372,9 @@ test_hogares_enriquecido <- test_hogares %>%
 # Añadir nuevas al vector
 vars <- c(vars, "edad_jefe2","edad_prom_occ2","sexo_desocup","edu_occ_lp","horasxedu_occ")
 
+# -------------------------------
 # 3) Armado de data (clasificación yes/no)
-
+# -------------------------------
 train_df <- train_hogares_enriquecido %>%
   mutate(
     Pobre = factor(Pobre, levels = c(1,0), labels = c("yes","no")),
@@ -391,60 +396,67 @@ train_df <- train_df %>% select(Pobre, all_of(common_preds), id)
 test_df  <- test_df  %>% select(all_of(common_preds), id)
 
 # -------------------------------
-# 4) Imputación (mediana num / moda factor) aprendida en TRAIN
+# 4) Imputación
 # -------------------------------
-# NaN -> NA
-train_df <- train_df %>% mutate(across(where(is.numeric), ~ ifelse(is.nan(.), NA_real_, .)))
-test_df  <- test_df  %>% mutate(across(where(is.numeric), ~ ifelse(is.nan(.), NA_real_, .)))
 
-get_mode <- function(x){
-  ux <- unique(x[!is.na(x)]); if(length(ux)==0) return(NA); ux[which.max(tabulate(match(x, ux)))]
+# Trabajar sobre copias y mantener id
+train_use  <- train_df
+test_final <- test_df
+
+# 4.1 NaN -> NA en numéricas para evitar sorpresas
+train_use  <- train_use  %>% mutate(across(where(is.numeric), ~ ifelse(is.nan(.), NA_real_, .)))
+test_final <- test_final %>% mutate(across(where(is.numeric), ~ ifelse(is.nan(.), NA_real_, .)))
+
+# 4.2 Detectar columnas numéricas y de factores SOLO en predictores
+preds_only_train <- train_use %>% select(all_of(common_preds))
+num_vars  <- names(preds_only_train)[vapply(preds_only_train, is.numeric, logical(1))]
+fact_vars <- names(preds_only_train)[vapply(preds_only_train, function(x) is.factor(x) || is.character(x), logical(1))]
+
+# 4.3 Numéricas: imputar NA -> 0
+for (v in num_vars) {
+  train_use[[v]][is.na(train_use[[v]])]   <- 0
+  test_final[[v]][is.na(test_final[[v]])] <- 0
 }
 
-train_pred <- train_df %>% select(all_of(common_preds))
-num_cols  <- names(train_pred)[sapply(train_pred, is.numeric)]
-fact_cols <- names(train_pred)[sapply(train_pred, function(x) is.factor(x) || is.character(x))]
+# 4.4 Categóricas con reglas especiales
+# Validar existencia
+if (!"cotiza_pens_jefe" %in% names(train_use)) stop("cotiza_pens_jefe no está en los datos.")
+if (!"pos_ocup_jefe"   %in% names(train_use)) stop("pos_ocup_jefe no está en los datos.")
 
-num_medians <- vapply(train_pred[num_cols], function(x){
-  m <- suppressWarnings(median(x, na.rm=TRUE)); if(is.na(m)) 0 else m
-}, numeric(1))
+# Asegurar clase factor
+if (!is.factor(train_use$cotiza_pens_jefe))  train_use$cotiza_pens_jefe  <- factor(train_use$cotiza_pens_jefe)
+if (!is.factor(test_final$cotiza_pens_jefe)) test_final$cotiza_pens_jefe <- factor(test_final$cotiza_pens_jefe)
+if (!is.factor(train_use$pos_ocup_jefe))     train_use$pos_ocup_jefe     <- factor(train_use$pos_ocup_jefe)
+if (!is.factor(test_final$pos_ocup_jefe))    test_final$pos_ocup_jefe    <- factor(test_final$pos_ocup_jefe)
 
-fact_modes <- vapply(train_pred[fact_cols], function(x){
-  m <- get_mode(x); if(is.na(m)) "missing" else as.character(m)
-}, character(1))
+# cotiza_pens_jefe: imputar NA como "2" (No)
+if (!("2" %in% levels(train_use$cotiza_pens_jefe)))  levels(train_use$cotiza_pens_jefe)  <- c(levels(train_use$cotiza_pens_jefe),  "2")
+if (!("2" %in% levels(test_final$cotiza_pens_jefe))) levels(test_final$cotiza_pens_jefe) <- c(levels(test_final$cotiza_pens_jefe), "2")
+train_use$cotiza_pens_jefe[is.na(train_use$cotiza_pens_jefe)]   <- "2"
+test_final$cotiza_pens_jefe[is.na(test_final$cotiza_pens_jefe)] <- "2"
 
-# Aplicar a TRAIN
-train_imp <- train_df
-for(fc in fact_cols){
-  if(is.factor(train_imp[[fc]])){
-    if(!fact_modes[[fc]] %in% levels(train_imp[[fc]]))
-      levels(train_imp[[fc]]) <- c(levels(train_imp[[fc]]), fact_modes[[fc]])
-    train_imp[[fc]][is.na(train_imp[[fc]])] <- fact_modes[[fc]]
-  } else {
-    v <- train_imp[[fc]]; v[is.na(v)] <- fact_modes[[fc]]; train_imp[[fc]] <- factor(v)
-  }
-}
-for(nc in num_cols){
-  train_imp[[nc]][is.na(train_imp[[nc]])] <- num_medians[[nc]]
-}
+# pos_ocup_jefe: agregar nivel "0" y asignar NA -> "0"
+if (!("0" %in% levels(train_use$pos_ocup_jefe)))  levels(train_use$pos_ocup_jefe)  <- c(levels(train_use$pos_ocup_jefe),  "0")
+if (!("0" %in% levels(test_final$pos_ocup_jefe))) levels(test_final$pos_ocup_jefe) <- c(levels(test_final$pos_ocup_jefe), "0")
+train_use$pos_ocup_jefe[is.na(train_use$pos_ocup_jefe)]   <- "0"
+test_final$pos_ocup_jefe[is.na(test_final$pos_ocup_jefe)] <- "0"
 
-# Aplicar a TEST con los mismos imputadores y alinear niveles
-test_imp <- test_df
-for(fc in fact_cols){
-  if(!is.factor(test_imp[[fc]])) test_imp[[fc]] <- factor(test_imp[[fc]])
-  if(!fact_modes[[fc]] %in% levels(test_imp[[fc]]))
-    levels(test_imp[[fc]]) <- c(levels(test_imp[[fc]]), fact_modes[[fc]])
-  test_imp[[fc]][is.na(test_imp[[fc]])] <- fact_modes[[fc]]
-  lvls <- union(levels(train_imp[[fc]]), levels(test_imp[[fc]]))
-  train_imp[[fc]] <- factor(train_imp[[fc]], levels = lvls)
-  test_imp[[fc]]  <- factor(test_imp[[fc]],  levels = lvls)
-}
-for(nc in num_cols){
-  test_imp[[nc]][is.na(test_imp[[nc]])] <- num_medians[[nc]]
+# 4.5 Para el resto de factores: alinear niveles entre TRAIN/TEST
+for (fc in fact_vars) {
+  if (!is.factor(train_use[[fc]]))  train_use[[fc]]  <- factor(train_use[[fc]])
+  if (!is.factor(test_final[[fc]])) test_final[[fc]] <- factor(test_final[[fc]])
+  lvls <- union(levels(train_use[[fc]]), levels(test_final[[fc]]))
+  train_use[[fc]]  <- factor(train_use[[fc]],  levels = lvls)
+  test_final[[fc]] <- factor(test_final[[fc]], levels = lvls)
 }
 
-stopifnot(all(complete.cases(train_imp %>% select(all_of(common_preds)))))
-stopifnot(all(complete.cases(test_imp  %>% select(all_of(common_preds)))))
+# 4.6 Verificación de completitud en predictores
+stopifnot(all(complete.cases(train_use  %>% select(all_of(common_preds)))))
+stopifnot(all(complete.cases(test_final %>% select(all_of(common_preds)))))
+
+# 4.7 Objetos finales para el resto del pipeline
+train_imp <- train_use
+test_imp  <- test_final
 
 # -------------------------------
 # 5) Tuning del árbol (rpart2) optimizando F1
@@ -452,13 +464,15 @@ stopifnot(all(complete.cases(test_imp  %>% select(all_of(common_preds)))))
 form <- as.formula(paste("Pobre ~", paste(common_preds, collapse = " + ")))
 
 ctrl_F1 <- trainControl(
-  method = "cv", number = 5,
+  method = "cv",
+  number = 5,
   classProbs = TRUE,
-  summaryFunction = prSummary,
+  summaryFunction = prSummary,  # calcula AUC-PR, F, Precision, Recall
   savePredictions = "final"
 )
 
 grid_dt <- expand.grid(maxdepth = 2:10)
+
 set.seed(123)
 dt_clasif_F1 <- train(
   form,
@@ -484,6 +498,9 @@ kaggle_sub <- test_imp %>%
   )
 
 write_csv(kaggle_sub, here::here("stores", "CART_clasif_F1.csv"))
+
+cat("Archivo guardado en:", here::here("stores", "CART_clasif_F1.csv"), "\n")
+
 
 ```
 
