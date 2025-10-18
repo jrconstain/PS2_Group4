@@ -1770,3 +1770,98 @@ write_csv(kaggle_sub, here::here("stores", nombre_archivoGBM))
 message("Archivo guardado en: ", here::here("stores", nombre_archivoGBM))
 ```
 
+```{r}
+# ==========================================================
+# GUARDADO ROBUSTO DE RESULTADOS — GBM (V3 FULL VARS)
+# Requiere en memoria:
+#   gbm_fit_2, gbm_grid_2, f1_by_thr, best_thr, umbral_opt,
+#   kaggle_sub_2, test_prob_2, Pobre_pred_2, train_use, vars, ctrl
+# ==========================================================
+library(readr); library(dplyr); library(tibble); library(here); library(caret)
+
+# 1) Carpeta con timestamp y etiqueta del experimento
+run_tag   <- "GBTREE_F1_V3_FULLVARS"
+run_stamp <- format(Sys.time(), "%Y%m%d_%H%M%S")
+out_dir   <- here::here("stores", paste0(run_tag, "_", run_stamp))
+dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+
+# 2) Guardar MODELO (RDS comprimido)
+saveRDS(gbm_fit_2, file = file.path(out_dir, "gbm_fit_2.rds"), compress = "xz")
+
+# 3) Guardar GRID y mejor tuning
+write_csv(gbm_grid_2,                 file.path(out_dir, "tune_grid.csv"))
+write_csv(as_tibble(gbm_fit_2$bestTune), file.path(out_dir, "best_tune.csv"))
+
+# 4) Resultados de CV (todas las combinaciones)
+write_csv(as_tibble(gbm_fit_2$results), file.path(out_dir, "cv_results.csv"))
+
+# 5) OOF del mejor modelo (por savePredictions = 'final')
+#    obs: etiqueta real; pred: clase con corte 0.5; 'pobre' = prob clase positiva
+oof <- gbm_fit_2$pred %>%
+  select(rowIndex, obs, pred, pobre, Resample)
+write_csv(oof, file.path(out_dir, "oof_predictions.csv"))
+
+# 6) Curva F1 vs threshold y umbral óptimo
+write_csv(f1_by_thr,                     file.path(out_dir, "f1_by_threshold.csv"))
+write_csv(as_tibble(best_thr),           file.path(out_dir, "best_threshold_row.csv"))
+writeLines(as.character(umbral_opt),     con = file.path(out_dir, "umbral_opt.txt"))
+
+# 7) Matriz de confusión OOF al umbral óptimo (útil para diagnóstico)
+levs <- levels(train_use$Pobre)
+neg  <- levs[1]; pos <- levs[2]
+pred_cls_oof <- factor(ifelse(oof$pobre >= umbral_opt, pos, neg), levels = levs)
+cm_oof <- caret::confusionMatrix(pred_cls_oof, factor(oof$obs, levels = levs), positive = pos)
+capture.output(cm_oof, file = file.path(out_dir, "confusion_matrix_oof.txt"))
+
+# 8) Importancia de variables
+vi <- caret::varImp(gbm_fit_2)$importance %>%
+  rownames_to_column("variable") %>% arrange(desc(Overall))
+write_csv(vi, file.path(out_dir, "variable_importance.csv"))
+
+# 9) Predicciones de TEST (proba y binaria) + submission
+#    id desde test_hogares_enriquecido (ya usaste esto en el submit)
+id_test <- as.character(test_hogares_enriquecido$id)
+stopifnot(length(id_test) == length(test_prob_2),
+          length(id_test) == length(Pobre_pred_2))
+
+pred_test_full <- tibble(
+  id         = id_test,
+  prob_pobre = as.numeric(test_prob_2),
+  Pobre_pred = as.integer(Pobre_pred_2)
+)
+write_csv(pred_test_full, file.path(out_dir, "test_predictions_full.csv"))
+
+#   Submission final (ya construida arriba como kaggle_sub_2)
+write_csv(kaggle_sub_2, file.path(out_dir, "kaggle_submission.csv"))
+
+# 10) Metadatos del run (config clave para reproducibilidad)
+meta <- list(
+  run_tag       = run_tag,
+  timestamp     = run_stamp,
+  formula       = paste("Pobre ~", paste(vars, collapse = " + ")),
+  n_vars        = length(vars),
+  levels        = levels(train_use$Pobre),
+  ctrl = ctrl[c("method","number","classProbs","savePredictions","sampling")],
+  distribution  = "bernoulli",
+  bag.fraction  = 0.5,
+  metric        = "F1",
+  best_tune     = gbm_fit_2$bestTune,
+  grid_rows     = nrow(gbm_grid_2)
+)
+saveRDS(meta, file = file.path(out_dir, "meta_config.rds"), compress = "xz")
+
+# 11) Información de sesión
+sink(file.path(out_dir, "sessionInfo.txt")); print(sessionInfo()); sink()
+
+message("✅ Resultados guardados en: ", out_dir)
+
+```
+
+```{r}
+summary(gbm_fit_2)
+```
+
+
+
+
+
