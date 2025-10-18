@@ -29,8 +29,7 @@ p_load(rio, # Import/export data.
        scales,
        car,
        dplyr,
-       tidyr,
-       plurrr
+       tidyr
        )
 ```
 
@@ -292,7 +291,7 @@ test_hogares_enriquecido  <- df_test_hogares  %>% left_join(test_agg,  by = "id"
 # Variables base (las nuevas + básicas de hogar)
 # ============================================================
 
-vars <- c(
+vars <- c("id",
   # ---- Variables base del hogar ----
   "P5000","P5010","P5090","P5100","P5130","P5140",
   "Nper","Npersug","Depto","Lp",
