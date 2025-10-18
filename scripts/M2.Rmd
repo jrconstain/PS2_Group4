@@ -1858,7 +1858,7 @@ message("✅ Resultados guardados en: ", out_dir)
 ```
 
 ```{r}
-summary(gbm_fit_2)
+influencie_gbm_2 <- as.data.frame(summary(gbm_fit_2))
 ```
 
 

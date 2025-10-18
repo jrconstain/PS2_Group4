@@ -1,0 +1,718 @@
+---
+title: "M2"
+author: "G4"
+date: "2025-10-12"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(pacman)
+
+p_load(rio, # Import/export data.
+       tidyverse, # Tidy-data.
+       stargazer, # Descriptive statistics.
+       gt, # Descriptive statistics.
+       gtsummary,
+       caret, # For predictive model assessment.
+       gridExtra, # Arrange plots.
+       skimr, # Summarize data.
+       here, #for file searching
+       readr, #for opening files
+       ggplot2,
+       boot,
+       scales,
+       car,
+       dplyr,
+       tidyr,
+       MLmetrics, 
+       glmnet,
+       pROC,
+       rpart,
+       gbm,
+       xgboost,
+       forcats
+       )
+```
+
+```{r}
+ruta1 <- here("stores", "train_hogares.csv")
+df_train_hogares <- read_csv(ruta1)
+
+ruta2 <- here("stores", "train_personas.csv")
+df_train_personas <- read_csv(ruta2)
+
+ruta3 <- here("stores", "test_personas.csv")
+df_test_personas <- read_csv(ruta3)
+
+ruta4 <- here("stores", "test_hogares.csv")
+df_test_hogares <- read_csv(ruta4)
+
+# Create new variables at individual level
+# Function to create years of education
+add_edu_years <- function(df) {
+  df$edu_years <- ifelse(
+    df$P6210 %in% c(1, 2, 9), 0, # None, Preschool, Unknown → 0
+    ifelse(
+      df$P6210 %in% c(3, 4, 5), df$P6210s1, # Primary or Secondary → as is
+      ifelse(df$P6210 == 6, df$P6210s1 + 11, NA_real_) # Tertiary → add 11
+    )
+  )
+  df
+}
+
+
+# Function to create years of experience (Mincer-style proxy)
+# exp = age - edu_years - 6
+add_experience <- function(df) {
+  df$exp <- df$P6040 - df$edu_years - 6
+  df
+}
+
+# Function to Manage NA's on labor indicators
+fill_labor_nas <- function(df) {
+  vars <- c("Pet", "Oc", "Des", "Ina")
+  df %>%
+    mutate(across(all_of(vars), ~ as.integer(replace(., is.na(.), 0L))))
+}
+
+# Define PET_flexible (Urbano: 15–64 años; Rural: 12–69 años)
+add_pet_flexible <- function(df) {
+  df$PET_flexible <- ifelse(
+    is.na(df$P6040), NA_integer_,
+    ifelse(
+      df$Clase == 1,                           # Urbano
+      ifelse(df$P6040 >= 15 & df$P6040 <= 64, 1L, 0L),
+      ifelse(df$P6040 >= 12 & df$P6040 <= 69, 1L, 0L) # Rural
+    )
+  )
+  df
+}
+
+
+# Apply functiona to Train and Test
+df_train_personas <- add_edu_years(df_train_personas)
+df_test_personas  <- add_edu_years(df_test_personas)
+
+df_train_personas <- add_experience(df_train_personas)
+df_test_personas  <- add_experience(df_test_personas)
+
+df_train_personas <- fill_labor_nas(df_train_personas)
+df_test_personas  <- fill_labor_nas(df_test_personas)
+
+df_train_personas <- add_pet_flexible(df_train_personas)
+df_test_personas  <- add_pet_flexible(df_test_personas)
+
+```
+
+
+# Agreggate variables to household level
+
+```{r}
+agg_personas_to_hogares_plus_2 <- function(df_personas) {
+
+  # Helpers para robustez numérica
+  safe_div <- function(a, b) ifelse(is.na(b) | b <= 0, 0, a / b)
+
+  df_personas %>%
+    group_by(id) %>%
+    summarise(
+      # ===== BASE DE CONTEOS ===================================================
+      n_personas = n(),
+      n_occ      = sum(Oc  == 1, na.rm = TRUE),
+      n_des      = sum(Des == 1, na.rm = TRUE),
+      n_ina      = sum(Ina == 1, na.rm = TRUE),
+      n_pet      = sum(Pet == 1, na.rm = TRUE),
+
+      # ===== PET flexible ===
+      n_pet_flex        = sum(PET_flexible == 1, na.rm = TRUE),
+      n_no_pet_flex     = n_personas - n_pet_flex,
+      n_occ_in_pet_flex = sum(Oc == 1 & PET_flexible == 1, na.rm = TRUE),
+      
+
+      # ===== COMPOSICIÓN / PROPORCIONES (LEGADO + NUEVAS) =====================
+      prop_occ_nper     = safe_div(n_occ, n_personas),
+      prop_des_nper     = safe_div(n_des, n_personas),         # NUEVA
+      prop_ina_nper     = safe_div(n_ina, n_personas),         # NUEVA
+      prop_no_pet_nper  = safe_div(n_no_pet_flex, n_personas), # NUEVA (PET flexible)
+      prop_occ_pet      = safe_div(n_occ, n_pet),              # LEGADO (PET original)
+      prop_occ_pet_flex = safe_div(n_occ_in_pet_flex, n_pet_flex), # NUEVA (PET flexible)
+
+      # ===== JEFE DEL HOGAR: CARACTERÍSTICAS ==================================
+      edad_jefe       = dplyr::first(P6040[P6050 == 1]),
+      sexo_jefe       = dplyr::first(P6020[P6050 == 1]),
+      tam_emp_jefe    = dplyr::coalesce(dplyr::first(P6870[P6050 == 1]), 0),
+      cotiza_pens_jefe= dplyr::coalesce(dplyr::first(P6920[P6050 == 1]), 0),
+      pos_ocup_jefe   = dplyr::coalesce(dplyr::first(P6430[P6050 == 1]), 0),
+      antig_jefe      = dplyr::coalesce(dplyr::first(P6426[P6050 == 1]), 0), # si NA -> 0
+      jefe_max_edu    = max(P6210[P6050 == 1], na.rm = TRUE),  # LEGADO (cód. educ. máx.)
+      jefe_max_edu_years = {
+        val <- max(P6210[P6050 == 1], na.rm = TRUE)
+        if (is.finite(val)) val else 0
+      },
+      
+      # Indicadores del jefe
+      jefe_ocupado     = as.integer(any(P6050 == 1 & Oc == 1, na.rm = TRUE)),
+      prestaciones_jefe= as.integer(any(P6050 == 1 &
+                                  (P6510 == 1 | P6545 == 1 | P6580 == 1 |
+                                   P6630s1 == 1 | P6630s2 == 1 | P6630s3 == 1 |
+                                   P6630s4 == 1 | P6630s6 == 1),
+                                  na.rm = TRUE)),
+      horas_jefe       = ifelse(any(P6050 == 1 & Oc == 1, na.rm = TRUE),
+                                dplyr::first(P6800[P6050 == 1 & Oc == 1]), 0),
+
+      # ===== CALIDAD DEL EMPLEO (HOGAR) =======================================
+      prestaciones = as.integer(
+        any(P6510 == 1, na.rm = TRUE) |
+        any(P6545 == 1, na.rm = TRUE) |
+        any(P6580 == 1, na.rm = TRUE) |
+        any(P6630s1 == 1, na.rm = TRUE) |
+        any(P6630s2 == 1, na.rm = TRUE) |
+        any(P6630s3 == 1, na.rm = TRUE) |
+        any(P6630s4 == 1, na.rm = TRUE) |
+        any(P6630s6 == 1, na.rm = TRUE)   # (prioriza versión LEGADA)
+      ),
+      
+      prop_prest_occ = if (n_occ > 0) { 
+        mean( 
+          (P6510 == 1 | P6545 == 1 | P6580 == 1 | P6630s1 == 1 | P6630s2 == 1 | P6630s3 == 1 | P6630s4 == 1 | P6630s6 == 1)[Oc == 1], 
+          na.rm = TRUE 
+          ) 
+        } else 0,
+
+      # ===== HORAS Y TAMAÑOS (ENTRE OCUPADOS) =================================
+      prom_horas_occ  = ifelse(n_occ > 0, mean(P6800[Oc == 1], na.rm = TRUE), 0), # alias LEGADO
+      tam_emp_prom_occ= ifelse(n_occ > 0, mean(P6870[Oc == 1], na.rm = TRUE), 0),
+
+      # ===== ANTIGÜEDAD / EDUCACIÓN / EDAD (ENTRE OCUPADOS) ===================
+      antig_prom_occ  = ifelse(n_occ > 0, mean(P6426[Oc == 1], na.rm = TRUE), 0),
+      mean_edu_occ    = ifelse(n_occ > 0, mean(edu_years[Oc == 1], na.rm = TRUE), 0),
+      edad_prom_occ   = ifelse(n_occ > 0, mean(P6040[Oc == 1], na.rm = TRUE), 0),
+
+      # ===== SEGUNDO TRABAJO ===================================================
+      segundo_trabajo_hogar   = as.integer(any(P7040 == 1, na.rm = TRUE)),
+      horas_segundo_trabajo_prom = ifelse(any(P7040 == 1, na.rm = TRUE),
+                                          mean(P7045[P7040 == 1], na.rm = TRUE), 0),
+
+      # ===== DESOCUPACIÓN CON INGRESOS (CLASIFICACIÓN) ========================
+      n_desoc_con_ingresos   = sum(Des == 1 & (P7422 == 1 | P7472 == 1), na.rm = TRUE),
+      
+      desoc_con_ingresos_cat_chr = dplyr::case_when(
+        n_des == 0 ~ "sin_desocupados",
+        n_des > 0 & n_desoc_con_ingresos > 0 ~ "desoc_con_ingresos",
+        n_des > 0 & n_desoc_con_ingresos == 0 ~ "desoc_sin_ingresos",
+        TRUE ~ "sin_desocupados"
+      ),
+
+      # ===== TRABAJO INFANTIL / MAYORES (AGREGADO HOGAR) ======================
+      has_child_work_no_study = any(Clase == 1 & P6040 >= 10 & P6040 <= 14 &
+                                    Oc == 1 & P6240 != 3, na.rm = TRUE),
+      has_child_work_study    = any(Clase == 1 & P6040 >= 10 & P6040 <= 14 &
+                                    Oc == 1 & P6240 == 3, na.rm = TRUE),
+      child_work_cat_chr = dplyr::case_when(
+        has_child_work_no_study ~ "work_no_study",
+        has_child_work_study    ~ "work_study",
+        TRUE ~ "none"
+      ),
+      has_senior_calificado   = any(P6040 >= 65 & Oc == 1 & edu_years >= 16, na.rm = TRUE),
+      has_senior_no_cal       = any(P6040 >= 65 & Oc == 1 & edu_years < 16, na.rm = TRUE),
+      senior_work_cat_chr = dplyr::case_when(
+        has_senior_calificado ~ "calificado",
+        has_senior_no_cal     ~ "no_calificado",
+        TRUE ~ "none"
+      ),
+
+      # ===== INGRESOS NO LABORALES (INDICADORES) ===============================
+      ingreso_por_activos = as.integer(any(P7495 == 1 | P7500s2 == 1 | P7510s5 == 1, na.rm = TRUE)),
+      ingreso_otros       = as.integer(any(P7505 == 1 | P7510s7 == 1, na.rm = TRUE)),
+      ingreso_ayudas      = as.integer(any(P7510s1 == 1 | P7510s2 == 1 | P7510s3 == 1 |
+                                           P7500s3 == 1 | P7510s7 == 1, na.rm = TRUE)),
+
+      .groups = "drop"
+    ) %>%
+    mutate(
+      # ===== FACTORES CON NIVELES EXPLÍCITOS ==================================
+      desoc_con_ingresos_cat = factor(desoc_con_ingresos_cat_chr,
+                                      levels = c("sin_desocupados", "desoc_con_ingresos", "desoc_sin_ingresos")),
+      child_work_cat  = factor(child_work_cat_chr,
+                               levels = c("none", "work_study", "work_no_study")),
+      senior_work_cat = factor(senior_work_cat_chr,
+                               levels = c("none", "calificado", "no_calificado"))
+    ) %>%
+    # ===== ORDEN FINAL DE COLUMNAS ============================================
+    dplyr::select(
+      # ID
+      id,
+      # Conteos
+      n_personas, n_occ, n_des, n_ina, n_pet,
+      n_pet_flex, n_no_pet_flex, n_occ_in_pet_flex,
+      # Composición
+      prop_occ_nper, prop_des_nper, prop_ina_nper,
+      prop_no_pet_nper, prop_occ_pet, prop_occ_pet_flex,
+      # Jefe del hogar
+      edad_jefe, sexo_jefe, tam_emp_jefe, cotiza_pens_jefe, pos_ocup_jefe,
+      antig_jefe, jefe_max_edu, jefe_max_edu_years, jefe_ocupado,
+      prestaciones_jefe, horas_jefe,
+      # Calidad del empleo
+      prestaciones, prop_prest_occ,
+      # Ocupados: horas, tamaño, antigüedad, educación y edad
+      prom_horas_occ, tam_emp_prom_occ, antig_prom_occ, mean_edu_occ, edad_prom_occ,
+      # Segundo trabajo
+      segundo_trabajo_hogar, horas_segundo_trabajo_prom,
+      # Desocupación
+      n_desoc_con_ingresos, desoc_con_ingresos_cat,
+      # Trabajo infantil y mayores
+      child_work_cat, senior_work_cat,
+      # Ingresos no laborales
+      ingreso_por_activos, ingreso_otros, ingreso_ayudas
+    )
+}
+
+```
+
+```{r}
+# Aplicar al TRAIN: personas -> hogares
+train_agg <- agg_personas_to_hogares_plus_2(df_train_personas)
+train_hogares_enriquecido <- df_train_hogares %>% left_join(train_agg, by = "id")
+
+# Aplicar al TEST: personas -> hogares
+test_agg <- agg_personas_to_hogares_plus_2(df_test_personas)
+test_hogares_enriquecido  <- df_test_hogares  %>% left_join(test_agg,  by = "id")
+```
+
+```{r}
+# ============================================================
+# Variables base (las nuevas + básicas de hogar)
+# ============================================================
+
+vars <- c(
+  # ---- Variables base del hogar ----
+  "P5000","P5010","P5090","P5100","P5130","P5140",
+  "Nper","Npersug","Depto","Lp",
+  
+  # ---- Conteos ----
+  "n_personas","n_occ","n_des","n_ina","n_pet",
+  "n_pet_flex","n_no_pet_flex","n_occ_in_pet_flex",
+  
+  # ---- Composición ----
+  "prop_occ_nper","prop_des_nper","prop_ina_nper",
+  "prop_no_pet_nper","prop_occ_pet","prop_occ_pet_flex",
+  
+  # ---- Jefe del hogar ----
+  "edad_jefe","sexo_jefe","tam_emp_jefe","cotiza_pens_jefe",
+  "pos_ocup_jefe","antig_jefe","jefe_max_edu",
+  "jefe_max_edu_years","jefe_ocupado",
+  "prestaciones_jefe","horas_jefe",
+  
+  # ---- Calidad del empleo ----
+  "prestaciones","prop_prest_occ",
+  
+  # ---- Ocupados (promedios del hogar) ----
+  "prom_horas_occ","tam_emp_prom_occ","antig_prom_occ",
+  "mean_edu_occ","edad_prom_occ",
+  
+  # ---- Segundo trabajo ----
+  "segundo_trabajo_hogar","horas_segundo_trabajo_prom",
+  
+  # ---- Desocupación ----
+  "n_desoc_con_ingresos","desoc_con_ingresos_cat",
+  
+  # ---- Trabajo infantil y mayores ----
+  "child_work_cat","senior_work_cat",
+  
+  # ---- Ingresos no laborales ----
+  "ingreso_por_activos","ingreso_otros","ingreso_ayudas")
+
+# ============================================================
+# Limpieza de duplicados después de los joins
+# ============================================================
+
+train_hogares_enriquecido <- train_hogares_enriquecido %>%
+  select(-ends_with(".x"), -ends_with(".y")) %>%
+  distinct(id, .keep_all = TRUE)
+
+test_hogares_enriquecido <- test_hogares_enriquecido %>%
+  select(-ends_with(".x"), -ends_with(".y")) %>%
+  distinct(id, .keep_all = TRUE)
+
+# ============================================================
+# Creación de interacciones y transformaciones
+# ============================================================
+
+train_hogares_enriquecido <- train_hogares_enriquecido %>%
+  mutate(
+    # ---- Potencias (efectos no lineales) ----
+    edad_jefe2       = edad_jefe^2,
+    edad_prom_occ2   = edad_prom_occ^2,
+
+    # ---- Interacciones originales ----
+    sexo_desocup     = sexo_jefe * prop_des_nper,
+    edu_occ_lp       = mean_edu_occ * Lp,
+    horasxedu_occ    = prom_horas_occ * mean_edu_occ,
+    horasxpropocc    = prom_horas_occ * prop_occ_nper,
+
+    # ---- Nuevas interacciones principales ----
+    meanedu_x_propocc = mean_edu_occ * prop_occ_nper,
+    propocc_x_lp      = prop_occ_nper * Lp,
+    propocc_x_prest   = prop_occ_nper * prop_prest_occ
+  )
+
+# ---- Replicar mutaciones para test ----
+test_hogares_enriquecido <- test_hogares_enriquecido %>%
+  mutate(
+    edad_jefe2       = edad_jefe^2,
+    edad_prom_occ2   = edad_prom_occ^2,
+    sexo_desocup     = sexo_jefe * prop_des_nper,
+    edu_occ_lp       = mean_edu_occ * Lp,
+    horasxedu_occ    = prom_horas_occ * mean_edu_occ,
+    horasxpropocc    = prom_horas_occ * prop_occ_nper,
+    meanedu_x_propocc = mean_edu_occ * prop_occ_nper,
+    propocc_x_lp      = prop_occ_nper * Lp,
+    propocc_x_prest   = prop_occ_nper * prop_prest_occ
+  )
+
+# ============================================================
+# Añadir nuevas al vector de variables
+# ============================================================
+
+vars <- c(
+  vars,
+  "edad_jefe2","edad_prom_occ2","sexo_desocup",
+  "edu_occ_lp","horasxedu_occ", "horasxpropocc",
+  "meanedu_x_propocc","propocc_x_lp","propocc_x_prest"
+)
+
+# ============================================================
+# Armar train/test finales para modelado
+# ============================================================
+
+train_use <- train_hogares_enriquecido %>%
+  select(Pobre, all_of(vars)) %>%
+  mutate(Pobre = factor(Pobre, levels = c(0,1), labels = c("no_pobre","pobre")))
+
+test_final <- test_hogares_enriquecido %>%
+  select(all_of(vars))
+
+# ============================================================
+# Definir categóricas y numéricas
+# ============================================================
+
+# Categóricas
+cat_vars <- c(
+  "Depto","P5090",
+  "sexo_jefe","pos_ocup_jefe","cotiza_pens_jefe","jefe_max_edu",
+  "child_work_cat","senior_work_cat","desoc_con_ingresos_cat"
+)
+
+# Definir numéricas como todo lo demás
+num_vars <- setdiff(vars, cat_vars)
+
+# ---- Convertir tipo adecuadamente ----
+train_use[cat_vars]  <- lapply(train_use[cat_vars],  factor)
+test_final[cat_vars] <- lapply(test_final[cat_vars], as.character)
+
+# ---- Forzar conversión a numérico (maneja factors o caracteres)
+for (v in c("P5100","P5130","P5140")) {
+  train_use[[v]] <- as.numeric(as.character(train_use[[v]]))
+  test_final[[v]] <- as.numeric(as.character(test_final[[v]]))
+}
+
+# ============================================================
+# IMPUTACIÓN
+# ============================================================
+
+# 0 para numericas faltantes
+for (v in num_vars) {
+  train_use[[v]][is.na(train_use[[v]])] <- 0
+  test_final[[v]][is.na(test_final[[v]])] <- 0
+}
+
+# cotiza_pens_jefe: imputar NA a "2" (No)
+train_use$cotiza_pens_jefe[is.na(train_use$cotiza_pens_jefe)] <- "2"
+test_final$cotiza_pens_jefe[is.na(test_final$cotiza_pens_jefe)] <- "2"
+
+# ppos_ocup_jefe: crear nuevo nivel "0" y asignar a NA
+levels(train_use$pos_ocup_jefe) <- c(levels(train_use$pos_ocup_jefe), "0")
+levels(test_final$pos_ocup_jefe) <- c(levels(test_final$pos_ocup_jefe), "0")
+
+train_use$pos_ocup_jefe[is.na(train_use$pos_ocup_jefe)] <- "0"
+test_final$pos_ocup_jefe[is.na(test_final$pos_ocup_jefe)] <- "0"
+
+for (v in cat_vars) {
+  niveles <- union(levels(train_use[[v]]), unique(test_final[[v]]))
+  train_use[[v]] <- factor(train_use[[v]], levels = niveles)
+  test_final[[v]] <- factor(test_final[[v]], levels = niveles)
+}
+```
+
+```{r}
+# ==========================================================
+# XGBoost (caret::xgbTree) — Optimización por F1
+# - Positiva: "pobre"
+# - CV k-fold con prSummary (Precision, Recall, F1)
+# - Selección de umbral óptimo (vía OOF) para maximizar F1
+# ==========================================================
+
+set.seed(91519)
+
+# ----------------------------------------------------------
+# 0) Datos y clase positiva
+# ----------------------------------------------------------
+# Asegura que la clase positiva "pobre" sea el PRIMER nivel
+train_use <- train_use %>%
+  mutate(Pobre = fct_relevel(Pobre, "pobre", "no_pobre"))
+
+# (Opcional) Verifica que test_final tenga exactamente las mismas columnas de `vars`
+stopifnot(all(vars %in% names(train_use)),
+          all(vars %in% names(test_final)))
+
+# ----------------------------------------------------------
+# 1) Control de entrenamiento (CV + proba + prSummary + OOF)
+# ----------------------------------------------------------
+ctrl_f1 <- trainControl(
+  method = "cv",
+  number = 5,
+  classProbs = TRUE,
+  summaryFunction = prSummary,   # devuelve AUC, Precision, Recall, F
+  savePredictions = "final",     # guarda predicciones OOF del MEJOR modelo
+  verboseIter = TRUE
+)
+
+# ----------------------------------------------------------
+# 2) Grilla de hiperparámetros (puedes ampliarla si hay tiempo)
+# ----------------------------------------------------------
+grid_xgboost <- expand.grid(
+  nrounds = c(100, 1000),
+  max_depth = c(2, 4),
+  eta = c(0.01, 0.05),
+  gamma = c(0, 1),
+  colsample_bytree = c(0.4, 0.7),
+  min_child_weight = c(10, 25),
+  subsample = c(0.7)
+)
+
+# ----------------------------------------------------------
+# 3) Entrenamiento
+# ----------------------------------------------------------
+xgb_f1 <- caret::train(
+  Pobre ~ .,
+  data = train_use %>% select(Pobre, all_of(vars)),
+  method = "xgbTree",
+  trControl = ctrl_f1,
+  tuneGrid = grid_xgboost,
+  metric = "F",                  # <- optimiza F1 en CV
+  # preProcess = c("medianImpute") # <- si necesitas imputación simple
+  verbosity = 0
+)
+
+xgb_f1
+xgb_f1$bestTune   # hiperparámetros ganadores según F1
+
+# ----------------------------------------------------------
+# 4) Selección del umbral óptimo con OOF (max F1)
+# ----------------------------------------------------------
+# Extrae predicciones OOF del mejor set de hiperparámetros
+pred_oof <- xgb_f1$pred
+
+# Filtra filas que correspondan EXACTAMENTE al bestTune
+bt <- xgb_f1$bestTune
+pred_oof <- pred_oof %>%
+  semi_join(bt, by = c("nrounds","max_depth","eta","gamma",
+                       "colsample_bytree","min_child_weight","subsample"))
+
+# Asegúrate de identificar la columna de probabilidad de la clase positiva "pobre"
+# caret nombra las columnas de probas con los nombres de los niveles de la clase
+stopifnot("pobre" %in% colnames(pred_oof))
+prob_col <- "pobre"
+
+# Búsqueda de umbral
+thresholds <- seq(0.01, 0.99, by = 0.01)
+
+calc_prf <- function(th) {
+  pred_lbl <- ifelse(pred_oof[[prob_col]] >= th, "pobre", "no_pobre")
+  pred_lbl <- factor(pred_lbl, levels = c("pobre","no_pobre"))
+  ref_lbl  <- factor(pred_oof$obs, levels = c("pobre","no_pobre"))
+
+  TP <- sum(pred_lbl == "pobre"     & ref_lbl == "pobre")
+  FP <- sum(pred_lbl == "pobre"     & ref_lbl == "no_pobre")
+  FN <- sum(pred_lbl == "no_pobre"  & ref_lbl == "pobre")
+
+  precision <- ifelse((TP + FP) > 0, TP/(TP + FP), 0)
+  recall    <- ifelse((TP + FN) > 0, TP/(TP + FN), 0)
+  F1        <- ifelse((precision + recall) > 0, 2*precision*recall/(precision + recall), 0)
+
+  tibble(threshold = th, precision = precision, recall = recall, F1 = F1)
+}
+
+pr_curve <- map_dfr(thresholds, calc_prf)
+
+# Umbral óptimo por F1 (rompe empates con mayor recall y luego mayor precision)
+best_F1 <- max(pr_curve$F1, na.rm = TRUE)
+cand <- dplyr::filter(pr_curve, F1 == best_F1)
+
+opt_row <- cand %>%
+  dplyr::arrange(dplyr::desc(recall), dplyr::desc(precision)) %>%
+  dplyr::slice_head(n = 1)
+
+opt_threshold <- opt_row$threshold
+
+
+message(sprintf("Umbral óptimo (OOF) para F1: %.3f | F1=%.4f, P=%.4f, R=%.4f",
+                opt_threshold, opt_row$F1, opt_row$precision, opt_row$recall))
+
+# ----------------------------------------------------------
+# 5) Predicción en TEST y clasificación final con el umbral óptimo
+# ----------------------------------------------------------
+probas_test <- predict(xgb_f1, newdata = test_final %>% select(all_of(vars)), type = "prob")
+stopifnot("pobre" %in% colnames(probas_test))
+
+pred_test_lbl <- ifelse(probas_test[["pobre"]] >= opt_threshold, "pobre", "no_pobre") %>%
+  factor(levels = c("pobre","no_pobre"))
+
+# 1) id del dataset de test
+id_test <- as.character(test_hogares_enriquecido$id)
+
+# 3) Vector binario 0/1 requerido (no_pobre=0, pobre=1)
+Pobre_pred_3 <- ifelse(pred_test_lbl == "pobre", 1L, 0L)
+
+# 4) Chequeo de consistencia de longitudes
+stopifnot(length(id_test) == length(Pobre_pred_3))
+
+# 5) Data frame final para exportar (formato “Kaggle”/envío)
+kaggle_sub_2 <- tibble(
+  id    = id_test,
+  Pobre = as.integer(Pobre_pred_3)
+)
+
+# 6) Guardar archivo con nombre informativo (modelo + F1 + umbral)
+#    Ejemplo: XGB_F1_TH_0.33.csv  (redondeamos threshold a 2 decimales)
+th_tag <- str_replace(sprintf("%.2f", opt_threshold), "\\.", "")
+# th_tag = "033" si opt_threshold = 0.33
+
+nombre_archivo_xgb <- paste0("XGB_F1_TH_", th_tag, ".csv")
+readr::write_csv(kaggle_sub_2, here::here("stores", nombre_archivo_xgb))
+message("Archivo guardado en: ", here::here("stores", nombre_archivo_xgb))
+
+
+
+```
+
+```{r}
+# ==========================================================
+# GUARDADO ROBUSTO DE RESULTADOS — XGB (F1, FULL VARS)
+# Requiere en memoria:
+#   xgb_f1, grid_xgboost, pr_curve, opt_row, opt_threshold,
+#   probas_test, Pobre_pred_01, kaggle_sub_simple,
+#   train_use, vars, ctrl_f1, test_hogares_enriquecido
+# ==========================================================
+suppressPackageStartupMessages({
+  library(readr); library(dplyr); library(tibble); library(here); library(caret)
+  library(stringr); library(purrr); library(tidyr); library(forcats)
+})
+
+# 1) Carpeta con timestamp y etiqueta del experimento
+run_tag   <- "XGB_F1_V3_FULLVARS"
+run_stamp <- format(Sys.time(), "%Y%m%d_%H%M%S")
+out_dir   <- here::here("stores", paste0(run_tag, "_", run_stamp))
+dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+
+# 2) MODELO (RDS comprimido)
+saveRDS(xgb_f1, file = file.path(out_dir, "xgb_f1_model.rds"), compress = "xz")
+
+# 3) GRID y mejor tuning
+write_csv(grid_xgboost,                     file.path(out_dir, "tune_grid.csv"))
+write_csv(as_tibble(xgb_f1$bestTune),       file.path(out_dir, "best_tune.csv"))
+
+# 4) Resultados de CV
+# 4a) Métricas promedio por combinación del grid
+write_csv(as_tibble(xgb_f1$results),        file.path(out_dir, "cv_results_by_grid.csv"))
+# 4b) Métricas por resample/fold y combinación
+write_csv(as_tibble(xgb_f1$resample),       file.path(out_dir, "cv_results_by_resample.csv"))
+# 4c) TODAS las predicciones CV (para todo el grid; puede ser grande)
+write_csv(as_tibble(xgb_f1$pred),           file.path(out_dir, "cv_predictions_all.csv.gz"))
+
+# 5) OOF del mejor modelo (filtrado desde xgb_f1$pred)
+bt <- xgb_f1$bestTune
+oof_best <- xgb_f1$pred %>%
+  semi_join(bt, by = c("nrounds","max_depth","eta","gamma",
+                       "colsample_bytree","min_child_weight","subsample")) %>%
+  select(rowIndex, obs, pred, pobre, Resample)
+write_csv(oof_best, file.path(out_dir, "oof_predictions_best.csv"))
+
+# 6) Curva F1 vs. threshold y umbral óptimo
+write_csv(as_tibble(pr_curve),              file.path(out_dir, "oof_f1_by_threshold.csv"))
+write_csv(as_tibble(opt_row),               file.path(out_dir, "oof_best_threshold_row.csv"))
+writeLines(as.character(opt_threshold),     con = file.path(out_dir, "oof_opt_threshold.txt"))
+
+# 7) Matriz de confusión OOF al umbral óptimo
+#    Definimos explícitamente la clase positiva "pobre"
+levs <- levels(train_use$Pobre)
+pred_cls_oof <- factor(ifelse(oof_best$pobre >= opt_threshold, "pobre", "no_pobre"),
+                       levels = c("pobre","no_pobre"))
+cm_oof <- caret::confusionMatrix(pred_cls_oof,
+                                 factor(oof_best$obs, levels = c("pobre","no_pobre")),
+                                 positive = "pobre")
+capture.output(cm_oof, file = file.path(out_dir, "oof_confusion_matrix.txt"))
+
+# 8) Importancia de variables
+vi <- caret::varImp(xgb_f1)$importance %>%
+  rownames_to_column("variable") %>%
+  arrange(desc(Overall))
+write_csv(vi, file.path(out_dir, "variable_importance.csv"))
+
+# 9) Predicciones de TEST (probas, etiqueta 0/1) + submissions
+#    id desde test_hogares_enriquecido
+id_test <- as.character(test_hogares_enriquecido$id)
+stopifnot(length(id_test) == nrow(probas_test),
+          length(id_test) == length(Pobre_pred_3))
+
+pred_test_full <- tibble(
+  id          = id_test,
+  prob_pobre  = as.numeric(probas_test[["pobre"]]),
+  Pobre_01    = as.integer(Pobre_pred_3)
+)
+write_csv(pred_test_full, file.path(out_dir, "test_predictions_full.csv"))
+
+#   Submission final “simple” (id, Pobre 0/1) que ya preparaste como kaggle_sub_simple
+write_csv(kaggle_sub_2, file.path(out_dir, "kaggle_submission_simple.csv"))
+
+#   (Opcional) Submission “full” con probas y etiqueta
+if (exists("kaggle_sub_full")) {
+  write_csv(kaggle_sub_full, file.path(out_dir, "kaggle_submission_full.csv"))
+}
+
+# 10) Metadatos del run (config clave para reproducibilidad)
+meta <- list(
+  run_tag          = run_tag,
+  timestamp        = run_stamp,
+  formula          = paste("Pobre ~", paste(vars, collapse = " + ")),
+  n_vars           = length(vars),
+  levels_Pobre     = levels(train_use$Pobre),
+  positive_class   = "pobre",
+  train_control    = ctrl_f1[c("method","number","classProbs","savePredictions","summaryFunction","sampling")],
+  metric           = "F",
+  grid_rows        = nrow(grid_xgboost),
+  best_tune        = xgb_f1$bestTune,
+  opt_threshold    = opt_threshold,
+  thresholds_grid  = length(unique(pr_curve$threshold)),
+  notes            = "XGBoost via caret::xgbTree; F1 tuning con prSummary; umbral óptimo OOF."
+)
+saveRDS(meta, file.path(out_dir, "meta_config.rds"), compress = "xz")
+
+# 11) Información de sesión (versiones de paquetes, R, etc.)
+sink(file.path(out_dir, "sessionInfo.txt")); print(sessionInfo()); sink()
+
+message("✅ Resultados guardados en: ", out_dir)
+
+# (Opcional) Copia de compatibilidad con tu esquema anterior de nombres:
+th_tag <- str_replace(sprintf("%.2f", opt_threshold), "\\.", "")
+readr::write_csv(kaggle_sub_2,
+                 here::here("stores", paste0("XGB_F1_TH_", th_tag, ".csv")))
+
+```
+
+
+
