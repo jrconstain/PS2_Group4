@@ -837,6 +837,72 @@ readr::write_csv(kaggle_sub_simple, here::here("stores", paste0("XGB_F1_WEIGHTS_
 
 ```
 
+```{r}
+# ==========================================================
+# GUARDAR RESULTADOS — XGB (F1 + Weights) con tus objetos
+# Usa: xgb_f1_w, grid_xgboost_w, pred_oof, pr_curve, opt_threshold,
+#      probas_test, Pobre_pred_01, kaggle_sub_simple, train_use, vars
+# ==========================================================
+library(readr); library(dplyr); library(tibble); library(here); library(caret); library(stringr)
+
+run_tag   <- "XGB_F1_WEIGHTS"
+run_stamp <- format(Sys.time(), "%Y%m%d_%H%M%S")
+out_dir   <- here::here("stores", paste0(run_tag, "_", run_stamp))
+dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+
+# 1) Modelo y tuning
+saveRDS(xgb_f1_w, file.path(out_dir, "model_xgb_f1_w.rds"), compress = "xz")
+write_csv(grid_xgboost_w,              file.path(out_dir, "tune_grid.csv"))
+write_csv(as_tibble(xgb_f1_w$bestTune),file.path(out_dir, "best_tune.csv"))
+
+# 2) Resultados de CV (promedios y por fold) + todas las predicciones del grid
+write_csv(as_tibble(xgb_f1_w$results),  file.path(out_dir, "cv_results_by_grid.csv"))
+write_csv(as_tibble(xgb_f1_w$resample), file.path(out_dir, "cv_results_by_resample.csv"))
+write_csv(as_tibble(xgb_f1_w$pred),     file.path(out_dir, "cv_predictions_all.csv.gz"))
+
+# 3) OOF del bestTune (ya tenías pred_oof filtrado)
+write_csv(pred_oof %>% select(rowIndex, obs, pred, pobre, Resample),
+          file.path(out_dir, "oof_predictions_best.csv"))
+
+# 4) Curva PR y umbral óptimo
+write_csv(as_tibble(pr_curve),          file.path(out_dir, "oof_f1_by_threshold.csv"))
+writeLines(as.character(opt_threshold), file.path(out_dir, "oof_opt_threshold.txt"))
+
+# 5) Matriz de confusión OOF al umbral (positivo = "pobre")
+pred_cls_oof <- factor(ifelse(pred_oof$pobre >= opt_threshold, "pobre", "no_pobre"),
+                       levels = c("pobre","no_pobre"))
+cm_oof <- caret::confusionMatrix(pred_cls_oof,
+                                 factor(pred_oof$obs, levels = c("pobre","no_pobre")),
+                                 positive = "pobre")
+capture.output(cm_oof, file = file.path(out_dir, "oof_confusion_matrix.txt"))
+
+# 6) Importancia de variables
+caret::varImp(xgb_f1_w)$importance %>%
+  rownames_to_column("variable") %>%
+  arrange(desc(Overall)) %>%
+  write_csv(file.path(out_dir, "variable_importance.csv"))
+
+# 7) Predicciones de TEST (full) y submission ya creada
+tibble(
+  id         = as.character(test_hogares_enriquecido$id),
+  prob_pobre = as.numeric(probas_test[["pobre"]]),
+  Pobre_01   = Pobre_pred_01
+) %>% write_csv(file.path(out_dir, "test_predictions_full.csv"))
+
+write_csv(kaggle_sub_simple, file.path(out_dir, "kaggle_submission.csv"))
+
+# 8) Mini metadatos útiles
+tibble(
+  run_tag   = run_tag,
+  run_stamp = run_stamp,
+  n_vars    = length(vars),
+  formula   = paste("Pobre ~", paste(vars, collapse = " + ")),
+  opt_thr   = opt_threshold
+) %>% write_csv(file.path(out_dir, "meta_min.csv"))
+
+message("✅ Guardado en: ", out_dir)
+
+```
 
 
 

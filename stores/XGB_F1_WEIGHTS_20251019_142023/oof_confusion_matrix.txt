@@ -1,0 +1,27 @@
+Confusion Matrix and Statistics
+
+          Reference
+Prediction  pobre no_pobre
+  pobre     26027    10980
+  no_pobre   6997   120956
+                                          
+               Accuracy : 0.891           
+                 95% CI : (0.8895, 0.8925)
+    No Information Rate : 0.7998          
+    P-Value [Acc > NIR] : < 2.2e-16       
+                                          
+                  Kappa : 0.6744          
+                                          
+ Mcnemar's Test P-Value : < 2.2e-16       
+                                          
+            Sensitivity : 0.7881          
+            Specificity : 0.9168          
+         Pos Pred Value : 0.7033          
+         Neg Pred Value : 0.9453          
+             Prevalence : 0.2002          
+         Detection Rate : 0.1578          
+   Detection Prevalence : 0.2243          
+      Balanced Accuracy : 0.8525          
+                                          
+       'Positive' Class : pobre           
+                                          
