@@ -1,5 +1,5 @@
 ---
-title: "logit"
+title: "Trees"
 author: "G4"
 date: "2025-10-12"
 output: html_document
@@ -30,220 +30,14 @@ p_load(rio, # Import/export data.
        tidyr,
        plurrr,
        MLmetrics, 
-       glmnet
+       glmnet,
+       paralell,
+       doParallel
        )
 ```
 
 ```{r}
-ruta1 <- here("stores", "train_hogares.csv")
-df_train_hogares <- read_csv(ruta1)
-
-ruta2 <- here("stores", "train_personas.csv")
-df_train_personas <- read_csv(ruta2)
-
-ruta3 <- here("stores", "test_personas.csv")
-df_test_personas <- read_csv(ruta3)
-
-ruta4 <- here("stores", "test_hogares.csv")
-df_test_hogares <- read_csv(ruta4)
-```
-
-```{r}
-
-# modelo 1 (Logit con variables iniciales household) 0.36
-set.seed(1011)
-
-# variables a usar
-vars <- c("P5000","P5010","P5090","P5100","P5130","P5140",
-          "Nper","Npersug","Depto","Lp")
-
-# Armar train/test
-train_use <- df_train_hogares %>%
-  select(Pobre, all_of(vars)) %>%
-  mutate(Pobre = factor(Pobre, levels = c(0,1), labels = c("no_pobre","pobre")))
-
-test_final <- df_test_hogares %>%
-  select(all_of(vars))
-
-# Convertir factores
-if ("Depto" %in% vars) {
-  train_use$Depto <- factor(train_use$Depto)
-  test_final$Depto <- as.character(test_final$Depto)
-}
-if ("P5090" %in% vars) {
-  train_use$P5090 <- factor(train_use$P5090)
-  test_final$P5090 <- as.character(test_final$P5090)
-}
-
-# IMPUTACIÓN
-# Numéricas: mediana del train
-num_vars <- vars[!(vars %in% c("Depto","P5090"))]
-for (v in num_vars) {
-  med <- median(train_use[[v]], na.rm = TRUE)
-  train_use[[v]][is.na(train_use[[v]])] <- med
-  test_final[[v]][is.na(test_final[[v]])] <- med
-}
-
-# Categóricas: moda del train
-if ("Depto" %in% vars) {
-  mode_depto <- names(which.max(table(train_use$Depto)))
-  train_use$Depto[is.na(train_use$Depto)] <- mode_depto
-  test_depto <- test_final$Depto
-  test_depto[is.na(test_depto) | !(test_depto %in% levels(train_use$Depto))] <- mode_depto
-  test_final$Depto <- factor(test_depto, levels = levels(train_use$Depto))
-}
-if ("P5090" %in% vars) {
-  mode_p5090 <- names(which.max(table(train_use$P5090)))
-  train_use$P5090[is.na(train_use$P5090)] <- mode_p5090
-  test_p5090 <- test_final$P5090
-  test_p5090[is.na(test_p5090) | !(test_p5090 %in% levels(train_use$P5090))] <- mode_p5090
-  test_final$P5090 <- factor(test_p5090, levels = levels(train_use$P5090))
-}
-
-# control y modelo
-ctrl <- trainControl(method = "cv", number = 5, classProbs = TRUE, savePredictions = TRUE)
-form <- as.formula(paste("Pobre ~", paste(vars, collapse = " + ")))
-
-set.seed(1410)
-modelo_logit <- train(
-  form, data = train_use,
-  method = "glm",
-  family = "binomial",
-  trControl = ctrl,
-  na.action = na.omit
-)
-
-# predicción
-pred_prob <- predict(modelo_logit, newdata = test_final, type = "prob")
-
-# Umbral
-th <- 0.5
-
-# Predicción binaria 0/1 usando la prob. de "pobre"
-prob_1 <- pred_prob[,"pobre"]
-pred_01 <- as.integer(prob_1 >= th)
-
-# Salida: id, probabilidad y predicción 0/1
-id_out <- if ("id" %in% names(df_test_hogares)) df_test_hogares$id else seq_len(nrow(df_test_hogares))
-
-predicciones_hogares <- tibble(
-  id = id_out,
-  prob_pobre_1 = prob_1,
-  pobre_pred   = pred_01
-)
-
-# Formato Kaggle
-kaggle_sub <- predicciones_hogares %>%
-  transmute(
-    id    = as.character(id),
-    pobre = as.integer(pobre_pred)
-  )
-
-# Ponle un nombre siguiendo la convención
-readr::write_csv(kaggle_sub, "LOGIT_treshold_05.csv")
-
-head(kaggle_sub)
-```
-
-mean_edu_occ prop_occ_nper prop_occ_pet jefe_max_edu prom_horas_occ
-
-```{r}
-# modelo 2 (Logit con primer set de variables individuales agregadas) 0.57
-
-ruta5 <- here("stores", "train_hogares_enriquecido.csv")
-train_hogares_enriquecido <- read_csv(ruta5)
-
-ruta6 <- here("stores", "test_hogares_enriquecido.csv")
-test_hogares_enriquecido <- read_csv(ruta6)
-
-```
-
-```{r}
-
-set.seed(1011)
-
-# var
-vars <- c(
-  "P5000","P5010","P5090","P5100","P5130","P5140",
-  "Nper","Npersug","Depto","Lp",
-  "mean_edu_occ","prop_occ_nper","prop_occ_pet","jefe_max_edu","prom_horas_occ"
-)
-
-# Armar train/test
-train_use <- train_hogares_enriquecido %>%
-  select(Pobre, all_of(vars)) %>%
-  mutate(Pobre = factor(Pobre, levels = c(0,1), labels = c("no_pobre","pobre")))
-
-test_final <- test_hogares_enriquecido %>%
-  select(all_of(vars))
-
-# solo Depto y P5090 son categóricas (además de Pobre)
-cat_vars <- c("Depto","P5090")
-num_vars <- setdiff(vars, cat_vars)
-
-# Train: factores; Test: char para mapear y luego fijar niveles
-train_use[cat_vars]  <- lapply(train_use[cat_vars],  factor)
-test_final[cat_vars] <- lapply(test_final[cat_vars], as.character)
-
-# IMPUTACIÓN (aprendida en TRAIN, aplicada a TRAIN y TEST)
-# Numéricas -> mediana del TRAIN
-for (v in num_vars) {
-  med <- median(train_use[[v]], na.rm = TRUE)
-  train_use[[v]][is.na(train_use[[v]])] <- med
-  test_final[[v]][is.na(test_final[[v]])] <- med
-}
-
-# Categóricas
-for (v in cat_vars) {
-  mode_v <- names(which.max(table(train_use[[v]])))
-  train_use[[v]][is.na(train_use[[v]])] <- mode_v
-  tmp <- test_final[[v]]
-  tmp[is.na(tmp) | !(tmp %in% levels(train_use[[v]]))] <- mode_v
-  test_final[[v]] <- factor(tmp, levels = levels(train_use[[v]]))
-}
-
-# 4.3 Drop levels en TRAIN
-train_use <- droplevels(train_use)
-
-# 5) caret: control y modelo
-ctrl <- trainControl(method = "cv", number = 5, classProbs = TRUE, savePredictions = TRUE)
-form <- as.formula(paste("Pobre ~", paste(vars, collapse = " + ")))
-
-set.seed(1410)
-modelo_logit <- train(
-  form, data = train_use,
-  method = "glm",
-  family = "binomial",
-  trControl = ctrl,
-  na.action = na.omit
-)
-
-# 6) Predicción en TEST (prob y clase 0/1 con th=0.5)
-pred_prob <- predict(modelo_logit, newdata = test_final, type = "prob")
-prob_1 <- pred_prob[,"pobre"]
-pred_01 <- as.integer(prob_1 >= 0.5)
-
-# 7) Salida con prob y pred
-id_out <- if ("id" %in% names(test_hogares_enriquecido)) test_hogares_enriquecido$id else seq_len(nrow(test_hogares_enriquecido))
-
-predicciones_hogares <- tibble(
-  id = id_out,
-  prob_pobre_1 = prob_1,
-  pobre_pred   = pred_01
-)
-
-# 8) Formato Kaggle (solo id, pobre)
-kaggle_sub <- predicciones_hogares %>%
-  transmute(
-    id    = as.character(id),
-    pobre = as.integer(pobre_pred)
-  )
-
-write_csv(kaggle_sub,  here::here("stores", "LOGIT_th_050_V2.csv"))
-```
-
-```{r}
-# modelo 3 (Logit con segundo set de variables individuales agregadas) 0.62
+########DATA MODEL 2
 
 ruta7 <- here("stores", "train_hogares_enriquecido_2.csv")
 train_hogares_enriquecido <- read_csv(ruta7)
@@ -251,14 +45,11 @@ train_hogares_enriquecido <- read_csv(ruta7)
 ruta8 <- here("stores", "test_hogares_enriquecido_2.csv")
 test_hogares_enriquecido <- read_csv(ruta8)
 
+fiveStats <- function(...) c(prSummary(...))
+
 ```
 
 ```{r}
-# ============================================================
-# LOGIT con 15 variables + interacciones y potencias 
-# ============================================================
-
-set.seed(2050)
 
 # Variables base (las nuevas + básicas de hogar)
 vars <- c(
@@ -342,156 +133,60 @@ for (v in cat_vars) {
 }
 train_use <- droplevels(train_use)
 
-# ============================================================
-# Modelo LOGIT
-# ============================================================
+```
 
-ctrl <- trainControl(method = "cv", number = 5, classProbs = TRUE, savePredictions = TRUE)
-form <- as.formula(paste("Pobre ~", paste(vars, collapse = " + ")))
+```{r}
+#########################################################
+####### CART #1 (Modelo con variables iniciales) ########
+#########################################################
 
-set.seed(2050)
-modelo_logit3 <- train(
-  form, data = train_use,
-  method = "glm",
-  family = "binomial",
-  trControl = ctrl,
-  na.action = na.omit
+#F1 = 0.48
+form <- as.formula(paste("Pobre ~", paste(common_preds, collapse = " + ")))
+
+ctrl_F1 <- trainControl(
+  method = "cv",
+  number = 5,
+  classProbs = TRUE,
+  summaryFunction = prSummary,  # calcula AUC-PR, F, Precision, Recall
+  savePredictions = "final"
 )
 
-# ============================================================
-# Predicciones
-# ============================================================
+grid_dt <- expand.grid(maxdepth = 2:10)
 
-pred_prob <- predict(modelo_logit3, newdata = test_final, type = "prob")
-prob_1 <- pred_prob[,"pobre"]
-pred_01 <- as.integer(prob_1 >= 0.5)
-
-id_out <- if ("id" %in% names(test_hogares_enriquecido)) test_hogares_enriquecido$id else seq_len(nrow(test_hogares_enriquecido))
-
-predicciones_hogares <- tibble(
-  id = id_out,
-  prob_pobre_1 = prob_1,
-  pobre_pred   = pred_01
+set.seed(123)
+dt_clasif_F1 <- train(
+  form,
+  data       = train_imp %>% select(-id),
+  method     = "rpart2",
+  trControl  = ctrl_F1,
+  tuneGrid   = grid_dt,
+  metric     = "F"
 )
 
-kaggle_sub <- predicciones_hogares %>%
+print(dt_clasif_F1)
+print(dt_clasif_F1$bestTune)
+
+test_pred_cls <- predict(dt_clasif_F1, newdata = test_imp, type = "raw")  # "yes"/"no"
+
+kaggle_sub <- test_imp %>%
   transmute(
     id    = as.character(id),
-    pobre = as.integer(pobre_pred)
+    Pobre = as.integer(test_pred_cls == "yes")
   )
 
-# Guardar
-write_csv(kaggle_sub, here::here("stores", "LOGIT_th_050_V3.csv"))
-```
+write_csv(kaggle_sub, here::here("stores", "CART_clasif_F1.csv"))
 
-Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+cat("Archivo guardado en:", here::here("stores", "CART_clasif_F1.csv"), "\n")
 
-
-```{r}
-#Modelo 4 (Logit + EN) 0.65
-
-# ============================================================
-# Modelo Elastic Net
-# ============================================================
-
-fiveStats <- function(...) c(prSummary(...))
-
-ctrl <- trainControl(method = "cv", number = 5, classProbs = TRUE, summaryFunction = fiveStats, savePredictions = TRUE)
-
-set.seed(2050)
-modelo_EN_1<- train(
-  Pobre ~ . , 
-  data = train_use,
-  metric = "F",
-  method = "glmnet",
-  family = "binomial",
-  trControl = ctrl,
-  tuneGrid = expand.grid(
-    alpha  = seq(0, 1, by= 0.1),
-    lambda = 10^seq(-3, 3, length = 10)
-  )   
-)
 
 ```
 
 ```{r}
-# ============================================================
-# Seleccionar el mejor Threshold interno
-# ============================================================
+##################################################################
+####### RANDOM FOREST #1 (Modelo con variables iniciales) ########
+##################################################################
 
-preds <- modelo_EN_1$pred
-umbrales <- seq(0.1, 0.9, by = 0.05)
-
-# Seleccionar el mejor alpha y lambda
-best_alpha  <- modelo_EN_1$bestTune$alpha
-best_lambda <- modelo_EN_1$bestTune$lambda
-
-# Filtrar solo las predicciones del mejor modelo
-preds_best <- preds %>%
-  dplyr::filter(alpha == best_alpha, lambda == best_lambda)
-
-
-f1_scores <- sapply(umbrales, function(th) {
-  pred_class <- ifelse(preds_best$pobre >= th, "pobre", "no_pobre")
-  F_meas(as.factor(pred_class), as.factor(preds_best$obs), relevant = "pobre")
-})
-
-
-plot(umbrales, f1_scores, type = "b", pch = 19,
-     main = "F1-score vs Umbral",
-     xlab = "Umbral de decisión", ylab = "F1-score")
-
-best_th <- umbrales[which.max(f1_scores)]
-best_th
-
-```
-
-```{r}
-
-# ============================================================
-# Predicciones y exportación (Elastic Net) 
-# ============================================================
-
-pred_prob <- predict(modelo_EN_1, newdata = test_final, type = "prob")
-prob_1 <- pred_prob[, 2]
-pred_01 <- as.integer(prob_1 >= 0.35)
-
-# ✅ Usa la misma fuente de IDs que funcionó con el LOGIT
-id_out <- if ("id" %in% names(test_hogares_enriquecido)) {
-  test_hogares_enriquecido$id
-} else {
-  seq_len(nrow(test_hogares_enriquecido))
-}
-
-predicciones_hogares <- tibble(
-  id = id_out,
-  prob_pobre_1 = prob_1,
-  pobre_pred   = pred_01
-)
-
-# Mantener consistencia con nombres y formato
-best_alpha  <- modelo_EN_1$bestTune$alpha
-best_lambda <- modelo_EN_1$bestTune$lambda
-
-nombre_archivo <- sprintf(
-  "EN_lambda_%s_alpha_%s_th_%s.csv",
-  format(round(best_lambda, 3), scientific = FALSE),
-  format(round(best_alpha, 2), nsmall = 2),
-  format(round(0.35, 2), nsmall = 2)  # para que quede trazable el cutoff
-)
-
-kaggle_sub <- predicciones_hogares %>%
-  transmute(
-    id    = as.character(id),
-    pobre = as.integer(pobre_pred)
-  )
-
-# Guardar
-write_csv(kaggle_sub, here::here("stores", nombre_archivo))
-```
-
-```{r}
-#Modelo 5 (Random Forest) 0.69
+#F1 = 0.65
 
 ctrl <- trainControl(method = "cv", number = 5, classProbs = TRUE, summaryFunction = fiveStats, savePredictions = TRUE)
 
@@ -551,8 +246,35 @@ kaggle_sub <- predicciones_hogaresRF %>%
 
 # Guardar
 write_csv(kaggle_sub, here::here("stores", nombre_archivoRF))
+```
 
-###Modelo 7 (Random Forest - Optimizamos threshold con Precision recall Curve)  0.68
+```{r}
+####################################################################################
+####### RANDOM FOREST #2 (Optimizamos threshold con Precision recall Curve) ########
+####################################################################################
+
+#F1 = 0.68
+
+ctrl <- trainControl(method = "cv", number = 5, classProbs = TRUE, summaryFunction = fiveStats, savePredictions = TRUE)
+
+
+set.seed(2050)  # Fijamos semilla para reproducibilidad
+
+p_load("ranger")
+tree_ranger_grid <-train (
+    Pobre ~ . ,  # Fórmula del modelo
+    data = train_use,  # Dataset de entrenamiento
+    method = "ranger",  # Usamos el motor ranger para Random Forests
+    trControl = ctrl,  # Especificamos los controles de entrenamiento
+    tuneGrid = expand.grid(   # Definimos la grilla de hiperparámetros a explorar
+        mtry = c(5,7,9),  # Número de predictores seleccionados al azar en cada división
+        splitrule = "gini",  # Regla de partición basada en la reducción de varianza (regresión)
+        min.node.size = c(30, 50)  # Tamaño mínimo de nodos terminales
+    ),
+    metric = "F",  # Optimiza la métrica de F
+    num.trees = 200
+)
+tree_ranger_grid
 
 p_load("pROC") # Paquete para calcular y visualizar curvas ROC
 
@@ -615,82 +337,18 @@ kaggle_sub <- predicciones_hogaresRF %>%
 # Guardar
 write_csv(kaggle_sub, here::here("stores", nombre_archivoRF))
 
-
-
 ```
 
 
 ```{r}
-#Modelo 6 (Random Forest) #IGNORAR 0.65
-ctrl <- trainControl(method = "cv", number = 10, classProbs = TRUE, summaryFunction = fiveStats, savePredictions = TRUE)
 
+#################################################################################################
+####### RANDOM FOREST #3 (Optimizamos threshold con Precision recall Curve + imputación) ########
+#################################################################################################
 
-set.seed(2050)  # Fijamos semilla para reproducibilidad
+#F1 = 0.69
 
-p_load("ranger")
-tree_ranger_grid <-train (
-    Pobre ~ . ,  # Fórmula del modelo
-    data = train_use,  # Dataset de entrenamiento
-    method = "ranger",  # Usamos el motor ranger para Random Forests
-    trControl = ctrl,  # Especificamos los controles de entrenamiento
-    tuneGrid = expand.grid(   # Definimos la grilla de hiperparámetros a explorar
-        mtry = c(5,7,9),  # Número de predictores seleccionados al azar en cada división
-        splitrule = "gini",  # Regla de partición basada en la reducción de varianza (regresión)
-        min.node.size = c(15,30, 50)  # Tamaño mínimo de nodos terminales
-    ),
-    metric = "F",  # Optimiza la métrica de F
-    num.trees = 500
-)
-tree_ranger_grid
-
-
-test_RF<- test_final  %>% mutate(pobre_hat_ranger=predict(tree_ranger_grid,newdata = test_final, type = "raw"))
-probRF_1 <- ifelse (test_RF$pobre_hat_ranger=="no_pobre",0,1)
-
-
-# ✅ Usa la misma fuente de IDs que funcionó con el LOGIT
-id_out <- if ("id" %in% names(test_hogares_enriquecido)) {
-  test_hogares_enriquecido$id
-} else {
-  seq_len(nrow(test_hogares_enriquecido))
-}
-
-predicciones_hogaresRF <- tibble(
-  id = id_out,
-  pobre_pred   = probRF_1
-)
-
-# Mantener consistencia con nombres y formato
-best_mtry  <- tree_ranger_grid$bestTune$mtry
-best_min.node.size <- tree_ranger_grid$bestTune$min.node.size
-best_splitrule <- tree_ranger_grid$bestTune$splitrule
-
-nombre_archivoRF <- sprintf(
-  "RF_mtry_%s_min.node.size_%s_SR_%s.csv",
-  format(best_mtry, 3),
-  format(best_min.node.size, 2),
-  format(best_splitrule, 2)  # para que quede trazable el cutoff
-)
-
-kaggle_sub <- predicciones_hogaresRF %>%
-  transmute(
-    id    = as.character(id),
-    pobre = as.integer(pobre_pred)
-  )
-
-# Guardar
-write_csv(kaggle_sub, here::here("stores", nombre_archivoRF))
-
-
-
-```
-
-```{r}
-
-
-###Modelo 8 (Random Forest - Optimizamos threshold con Precision recall Curve - imputación correcta) - 0.69
-
-##IMPUTACION CORRECTA
+##Nueva imputación
 # Numéricas_0 -> mediana
 for (v in num_vars) {
   train_use[[v]][is.na(train_use[[v]])] <- 0
@@ -712,7 +370,6 @@ train_use <- droplevels(train_use)
 
 ctrl <- trainControl(method = "cv", number = 5, classProbs = TRUE, summaryFunction = fiveStats, savePredictions = TRUE)
 
-
 set.seed(2050)  # Fijamos semilla para reproducibilidad
 
 p_load("ranger")
@@ -727,8 +384,7 @@ tree_ranger_grid <-train (
         min.node.size = c(30, 50)  # Tamaño mínimo de nodos terminales
     ),
     metric = "F",  # Optimiza la métrica de F
-    num.trees = 200,
-    importance = "permutation" 
+    num.trees = 200
 )
 tree_ranger_grid
 
@@ -800,7 +456,11 @@ write_csv(kaggle_sub, here::here("stores", nombre_archivoRF))
 
 ```{r}
 
-####MODELO 9 (RF CON IMPUTACIONES CORRECTAS - MAS VARIABLES. THRESHOLD OPTIMIZATION) 0.71
+#################################################################################################
+####### RANDOM FOREST #4 (Optimizamos threshold con Precision recall Curve + imputación + nuevas variables) ########
+#################################################################################################
+
+#F1 = 0.71
 
 ruta1 <- here("stores", "train_hogares.csv")
 df_train_hogares <- read_csv(ruta1)
@@ -826,7 +486,6 @@ add_edu_years <- function(df) {
   )
   df
 }
-
 
 # Function to create years of experience (Mincer-style proxy)
 # exp = age - edu_years - 6
@@ -855,7 +514,6 @@ add_pet_flexible <- function(df) {
   df
 }
 
-
 # Apply functiona to Train and Test
 df_train_personas <- add_edu_years(df_train_personas)
 df_test_personas  <- add_edu_years(df_test_personas)
@@ -869,12 +527,7 @@ df_test_personas  <- fill_labor_nas(df_test_personas)
 df_train_personas <- add_pet_flexible(df_train_personas)
 df_test_personas  <- add_pet_flexible(df_test_personas)
 
-```
-
-
 # Agreggate variables to household level
-
-```{r}
 agg_personas_to_hogares_plus_2 <- function(df_personas) {
 
   # Helpers para robustez numérica
@@ -1034,9 +687,6 @@ agg_personas_to_hogares_plus_2 <- function(df_personas) {
     )
 }
 
-```
-
-```{r}
 # Aplicar al TRAIN: personas -> hogares
 train_agg <- agg_personas_to_hogares_plus_2(df_train_personas)
 train_hogares_enriquecido <- df_train_hogares %>% left_join(train_agg, by = "id")
@@ -1044,9 +694,7 @@ train_hogares_enriquecido <- df_train_hogares %>% left_join(train_agg, by = "id"
 # Aplicar al TEST: personas -> hogares
 test_agg <- agg_personas_to_hogares_plus_2(df_test_personas)
 test_hogares_enriquecido  <- df_test_hogares  %>% left_join(test_agg,  by = "id")
-```
 
-```{r}
 # ============================================================
 # Variables base (las nuevas + básicas de hogar)
 # ============================================================
@@ -1209,29 +857,50 @@ for (v in cat_vars) {
   train_use[[v]] <- factor(train_use[[v]], levels = niveles)
   test_final[[v]] <- factor(test_final[[v]], levels = niveles)
 }
+# ============= Preparar Paralelización ===============
 
+# Detectar el número de núcleos disponibles
+n_cores <- detectCores() - 4  # deja 1 libre para el sistema
+
+# Crear el clúster
+cl <- makeCluster(n_cores)
+
+# Registrar el clúster para que caret lo use
+registerDoParallel(cl)
+
+# Confirmar
+getDoParWorkers()
+
+#======================================================
 
 ctrl <- trainControl(method = "cv", number = 5, classProbs = TRUE, summaryFunction = fiveStats, savePredictions = TRUE)
 
 set.seed(2050)  # Fijamos semilla para reproducibilidad
 
 p_load("ranger")
+cat("Entrenando modelo con", getDoParWorkers(), "núcleos...\n")
+start_time <- Sys.time()
 tree_ranger_grid <-train (
     Pobre ~ .,  # Fórmula del modelo
     data = train_use,  # Dataset de entrenamiento
     method = "ranger",  # Usamos el motor ranger para Random Forests
-    trControl = ctrl,  # Especificamos los controles de entrenamiento
+    trControl = ctrl, # Especificamos los controles de entrenamiento
+    verbose=TRUE,#Mirar progreso en el panel de control
     tuneGrid = expand.grid(   # Definimos la grilla de hiperparámetros a explorar
         mtry = c(5,7,9),  # Número de predictores seleccionados al azar en cada división
         splitrule = "gini",  # Regla de partición basada en la reducción de varianza (regresión)
         min.node.size = c(30, 50)  # Tamaño mínimo de nodos terminales
     ),
     metric = "F",  # Optimiza la métrica de F
-    num.trees = 200
+    num.trees = 200,
+    importance = "permutation" 
 )
+end_time <- Sys.time()
+cat("Tiempo total de entrenamiento:", round(difftime(end_time, start_time, units = "mins"), 2), "minutos\n")
+stopCluster(cl)
+registerDoSEQ()
 
 tree_ranger_grid
-
 
 p_load("pROC") # Paquete para calcular y visualizar curvas ROC
 
@@ -1280,6 +949,177 @@ best_splitrule <- prec_recall$threshold[which.max(prec_recall$F1)]
 
 nombre_archivoRF <- sprintf(
   "RF_mtry_%s_min.node.size_%s_SR_%s_update.csv",
+  format(best_mtry, 3),
+  format(best_min.node.size, 2),
+  format(best_splitrule, 2)  # para que quede trazable el cutoff
+)
+
+kaggle_sub <- predicciones_hogaresRF %>%
+  transmute(
+    id    = as.character(id),
+    pobre = as.integer(pobre_pred)
+  )
+
+# Guardar
+write_csv(kaggle_sub, here::here("stores", nombre_archivoRF))
+
+```
+
+
+```{r}
+#############################################################################################################################
+# RANDOM FOREST #5 (Optimizamos threshold con Precision recall Curve + imputación + nuevas variables + Variable Importance) #
+#############################################################################################################################
+
+#F1 = 0.70
+
+var_imp=varImp(tree_ranger_grid)
+df_vi=data.frame(var_imp$importance)
+df_vi$importance <- as.integer(df_vi$Overall)
+df_vi$feature <- rownames(df_vi)
+df_vi <- df_vi[order(-df_vi$Overall), ]
+
+write_xlsx(VI, here::here("stores", "VI_exportado.xlsx"))
+
+#Grafico de barras importance para determinar threshold de importancia
+
+df_vi$importance <- pmax(df_vi$importance, 0)
+
+o  <- order(df_vi$importance, decreasing = TRUE)
+y0 <- df_vi$importance[o]
+feat <- df_vi$feature[o]
+
+# Normaliza
+y <- (y0 - min(y0)) / (max(y0) - min(y0))
+x <- seq_along(y)
+
+# Distancia a la línea entre (1, y[1]) y (n, y[n])
+p1 <- c(1, y[1]); p2 <- c(length(y), y[length(y)])
+num <- abs((p2[2]-p1[2])*x - (p2[1]-p1[1])*y + p2[1]*p1[2] - p2[2]*p1[1])
+den <- sqrt((p2[2]-p1[2])^2 + (p2[1]-p1[1])^2)
+dist <- num / den
+
+knee_idx <- which.max(dist)
+corte_importancia <- y0[knee_idx]
+seleccion <- feat[seq_len(knee_idx)]
+
+cat("Codo en índice", knee_idx, ":", feat[knee_idx], 
+    " | importancia (sin normalizar):", corte_importancia, "\n")
+
+ggplot(data.frame(x, y), aes(x, y)) +
+  geom_line() + geom_point(size = 1) +
+  geom_vline(xintercept = knee_idx, linetype = "dashed") +
+  labs(x = "Rango (ordenado)", y = "Importancia normalizada",
+       title = "Codo en Importancia de Variables (distancia máxima)")
+
+# Filtrar df_vi
+#Se definió 9 como threshold con el objetivo de reducir el universo de variables, pero manteniendo variables importantes estadísitcamente, pero también economicamente.
+df_vi <- df_vi[df_vi$importance > 9, ]
+
+# Crear vector de variables importantes
+vars_imp <- df_vi$feature
+
+# Para train_use
+vars_imp_existentes <- vars_imp[vars_imp %in% names(train_use)]
+# Para test_final
+vars_imp_existentes_test <- vars_imp[vars_imp %in% names(test_final)]
+
+# Seleccionar columnas en train_use
+train_use <- train_use %>%
+  dplyr::select(Pobre, all_of(vars_imp_existentes))
+
+# Seleccionar columnas en test_final
+test_final <- test_final %>%
+  dplyr::select(all_of(vars_imp_existentes_test))
+
+# ============= Preparar Paralelización ===============
+
+# Detectar el número de núcleos disponibles
+n_cores <- detectCores() - 4  # deja 1 libre para el sistema
+
+# Crear el clúster
+cl <- makeCluster(n_cores)
+
+# Registrar el clúster para que caret lo use
+registerDoParallel(cl)
+
+# Confirmar
+getDoParWorkers()
+
+#=====================================================
+
+ctrl <- trainControl(method = "cv", number = 5, classProbs = TRUE, summaryFunction = fiveStats, savePredictions = TRUE)
+
+set.seed(2050)  # Fijamos semilla para reproducibilidad
+
+
+p_load("ranger")
+cat("Entrenando modelo con", getDoParWorkers(), "núcleos...\n")
+start_time <- Sys.time()
+tree_ranger_grid <-train (
+    Pobre ~ .,  # Fórmula del modelo
+    data = train_use,  # Dataset de entrenamiento
+    method = "ranger",  # Usamos el motor ranger para Random Forests
+    trControl = ctrl, # Especificamos los controles de entrenamiento
+    verbose=TRUE,#Mirar progreso en el panel de control
+    tuneGrid = expand.grid(   # Definimos la grilla de hiperparámetros a explorar
+        mtry = c(5,7,9),  # Número de predictores seleccionados al azar en cada división
+        splitrule = "gini",  # Regla de partición basada en la reducción de varianza (regresión)
+        min.node.size = c(30, 50)  # Tamaño mínimo de nodos terminales
+    ),
+    metric = "F",  # Optimiza la métrica de F
+    num.trees = 200 
+)
+
+tree_ranger_grid
+
+p_load("pROC") # Paquete para calcular y visualizar curvas ROC
+
+roc_obj_en<-roc(response=tree_ranger_grid$pred$obs,  # Valores reales de la variable objetivo
+                   predictor=tree_ranger_grid$pred$pobre, # Probabilidades predichas por el modelo
+                  levels = c("no_pobre", "pobre"),  # # Establece la referencia control y caso (empleado = negativo, desempleado = positivo) 
+                  direction = "<")  # "<" significa que "desempleado" es positivo
+     
+prec_recall<-data.frame(coords(roc_obj_en, seq(0,1,length=100), ret=c("threshold", "precision", "recall")))
+prec_recall
+
+prec_recall<- prec_recall  %>% mutate(F1=(2*precision*recall)/(precision+recall))
+prec_recall
+
+prec_recall$threshold[which.max(prec_recall$F1)]
+
+# Predicción de probabilidad de desempleo
+test_RFPR<- test_final %>% mutate(pobre_hat_ranger=predict(tree_ranger_grid,newdata = test_final, type = "prob")) 
+
+# Clasificación según el umbral óptimo de F1
+test_RFPR <- test_RFPR %>%
+  mutate(pobre_hat_rangerPRs_cutoff_F1 = factor(
+    ifelse(pobre_hat_ranger$pobre >= prec_recall$threshold[which.max(prec_recall$F1)], 1, 0),
+    levels = c(1, 0),
+    labels = c("pobre", "no_pobre")
+  ))
+probRF_1 <- ifelse (test_RFPR$pobre_hat_rangerPRs_cutoff_F1=="no_pobre",0,1)
+
+
+# ✅ Usa la misma fuente de IDs que funcionó con el LOGIT
+id_out <- if ("id" %in% names(test_hogares_enriquecido)) {
+  test_hogares_enriquecido$id
+} else {
+  seq_len(nrow(test_hogares_enriquecido))
+}
+
+predicciones_hogaresRF <- tibble(
+  id = id_out,
+  pobre_pred   = probRF_1
+)
+
+# Mantener consistencia con nombres y formato
+best_mtry  <- tree_ranger_grid$bestTune$mtry
+best_min.node.size <- tree_ranger_grid$bestTune$min.node.size
+best_splitrule <- prec_recall$threshold[which.max(prec_recall$F1)]
+
+nombre_archivoRF <- sprintf(
+  "VI_RF_mtry_%s_min.node.size_%s_SR_%s_update.csv",
   format(best_mtry, 3),
   format(best_min.node.size, 2),
   format(best_splitrule, 2)  # para que quede trazable el cutoff
