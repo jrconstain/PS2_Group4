@@ -715,4 +715,128 @@ readr::write_csv(kaggle_sub_2,
 ```
 
 
+```{r}
+# ==========================================================
+# XGBoost (caret::xgbTree) — F1 + Weights por observación
+# Positiva: "pobre"
+# ==========================================================
+
+set.seed(91519)
+
+# 0) Clase positiva fija (asegura consistencia)
+train_use <- train_use %>%
+  mutate(Pobre = fct_relevel(Pobre, "pobre", "no_pobre"))
+
+# 0.1) Checks
+stopifnot(all(vars %in% names(train_use)),
+          all(vars %in% names(test_final)))
+
+# 1) Ponderadores (case weights): pobres pesan más
+tbl   <- table(train_use$Pobre)        # niveles: "pobre", "no_pobre"
+n_pos <- as.numeric(tbl["pobre"])
+n_neg <- as.numeric(tbl["no_pobre"])
+spw   <- n_neg / n_pos                 # razón neg/pos
+print(spw)
+
+wts_xgb <- ifelse(train_use$Pobre == "pobre", spw, 1)
+stopifnot(length(wts_xgb) == nrow(train_use))
+
+
+ctrl_f1_w <- trainControl(
+  method = "cv",
+  number = 5,
+  classProbs = TRUE,
+  summaryFunction = prSummary,   # devuelve AUC, Precision, Recall, F
+  savePredictions = "final",     # guarda predicciones OOF del MEJOR modelo
+  verboseIter = TRUE
+)
+
+# ----------------------------------------------------------
+# 2) Grilla de hiperparámetros (puedes ampliarla si hay tiempo)
+# ----------------------------------------------------------
+grid_xgboost_w <- expand.grid(
+  nrounds = c(100, 1000),
+  max_depth = c(2, 4),
+  eta = c(0.01, 0.05),
+  gamma = c(0, 1),
+  colsample_bytree = c(0.4, 0.7),
+  min_child_weight = c(10, 25),
+  subsample = c(0.7)
+)
+
+# 4) Entrenamiento con weights
+xgb_f1_w <- caret::train(
+  Pobre ~ .,
+  data      = train_use %>% dplyr::select(Pobre, dplyr::all_of(vars)),
+  method    = "xgbTree",
+  trControl = ctrl_f1_w,
+  tuneGrid  = grid_xgboost_w,
+  metric    = "F",
+  verbosity = 0,
+  weights   = wts_xgb              # ponderación
+)
+
+print(xgb_f1_w)
+print(xgb_f1_w$bestTune)
+
+# 5) OOF del bestTune y búsqueda de umbral (igual que tu flujo previo)
+pred_oof <- xgb_f1_w$pred
+bt <- xgb_f1_w$bestTune
+pred_oof <- pred_oof %>%
+  dplyr::semi_join(bt, by = c("nrounds","max_depth","eta","gamma",
+                              "colsample_bytree","min_child_weight","subsample"))
+
+stopifnot("pobre" %in% colnames(pred_oof))
+thresholds <- seq(0.01, 0.99, by = 0.01)
+
+calc_prf <- function(th) {
+  pred_lbl <- ifelse(pred_oof[["pobre"]] >= th, "pobre", "no_pobre")
+  pred_lbl <- factor(pred_lbl, levels = c("pobre","no_pobre"))
+  ref_lbl  <- factor(pred_oof$obs, levels = c("pobre","no_pobre"))
+
+  TP <- sum(pred_lbl == "pobre"    & ref_lbl == "pobre")
+  FP <- sum(pred_lbl == "pobre"    & ref_lbl == "no_pobre")
+  FN <- sum(pred_lbl == "no_pobre" & ref_lbl == "pobre")
+
+  precision <- ifelse((TP+FP)>0, TP/(TP+FP), 0)
+  recall    <- ifelse((TP+FN)>0, TP/(TP+FN), 0)
+  F1        <- ifelse((precision+recall)>0, 2*precision*recall/(precision+recall), 0)
+  tibble(threshold = th, precision, recall, F1)
+}
+
+pr_curve <- map_dfr(thresholds, calc_prf)
+best_F1  <- max(pr_curve$F1, na.rm = TRUE)
+opt_row  <- pr_curve %>%
+  dplyr::filter(F1 == best_F1) %>%
+  dplyr::arrange(dplyr::desc(recall), dplyr::desc(precision)) %>%
+  dplyr::slice_head(n = 1)
+opt_threshold <- opt_row$threshold
+
+message(sprintf("Umbral óptimo (OOF) para F1 [weights]: %.3f | F1=%.4f, P=%.4f, R=%.4f",
+                opt_threshold, opt_row$F1, opt_row$precision, opt_row$recall))
+
+# 6) Predicción en TEST con el umbral óptimo (igual que antes)
+probas_test <- predict(xgb_f1_w, newdata = test_final %>% dplyr::select(dplyr::all_of(vars)), type = "prob")
+stopifnot("pobre" %in% colnames(probas_test))
+
+pred_test_lbl <- ifelse(probas_test[["pobre"]] >= opt_threshold, "pobre", "no_pobre") %>%
+  factor(levels = c("pobre","no_pobre"))
+
+id_test <- as.character(test_hogares_enriquecido$id)
+Pobre_pred_01 <- as.integer(pred_test_lbl == "pobre")
+stopifnot(length(id_test) == length(Pobre_pred_01))
+
+kaggle_sub_simple <- tibble::tibble(
+  id    = id_test,
+  Pobre = Pobre_pred_01
+)
+
+# (Opcional) Guardado simple
+th_tag <- stringr::str_replace(sprintf("%.2f", opt_threshold), "\\.", "")
+readr::write_csv(kaggle_sub_simple, here::here("stores", paste0("XGB_F1_WEIGHTS_TH_", th_tag, ".csv")))
+
+```
+
+
+
 
