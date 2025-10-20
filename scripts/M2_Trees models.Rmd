@@ -141,7 +141,7 @@ train_use <- droplevels(train_use)
 #########################################################
 
 #F1 = 0.48
-form <- as.formula(paste("Pobre ~", paste(common_preds, collapse = " + ")))
+form <- as.formula(paste("Pobre ~", paste(vars, collapse = " + ")))
 
 ctrl_F1 <- trainControl(
   method = "cv",
@@ -156,7 +156,7 @@ grid_dt <- expand.grid(maxdepth = 2:10)
 set.seed(123)
 dt_clasif_F1 <- train(
   form,
-  data       = train_imp %>% select(-id),
+  data       = train_use,
   method     = "rpart2",
   trControl  = ctrl_F1,
   tuneGrid   = grid_dt,
@@ -165,6 +165,29 @@ dt_clasif_F1 <- train(
 
 print(dt_clasif_F1)
 print(dt_clasif_F1$bestTune)
+
+#PR + F1 Construction
+
+# Predicción directa de clases
+train_pred <- predict(dt_clasif_F1, newdata = train_use, type = "raw")
+
+# Asegurar que las clases estén en el mismo formato
+train_pred <- factor(train_pred, levels = c("no_pobre", "pobre"))
+true_labels <- train_use$Pobre
+
+# Calcular métricas
+tp <- sum(train_pred == "pobre" & true_labels == "pobre")
+fp <- sum(train_pred == "pobre" & true_labels != "pobre")
+fn <- sum(train_pred != "pobre" & true_labels == "pobre")
+
+precision <- ifelse(tp + fp == 0, 0, tp / (tp + fp))
+recall    <- ifelse(tp + fn == 0, 0, tp / (tp + fn))
+f1_score  <- ifelse(precision + recall == 0, 0, 2 * precision * recall / (precision + recall))
+
+# Mostrar resultados
+cat(sprintf("Precision: %.4f\n", precision))
+cat(sprintf("Recall:    %.4f\n", recall))
+cat(sprintf("F1 Score:  %.4f\n", f1_score))
 
 test_pred_cls <- predict(dt_clasif_F1, newdata = test_imp, type = "raw")  # "yes"/"no"
 
@@ -188,12 +211,29 @@ cat("Archivo guardado en:", here::here("stores", "CART_clasif_F1.csv"), "\n")
 
 #F1 = 0.65
 
+# ============= Preparar Paralelización ===============
+
+# Detectar el número de núcleos disponibles
+n_cores <- detectCores() - 4  # deja 1 libre para el sistema
+
+# Crear el clúster
+cl <- makeCluster(n_cores)
+
+# Registrar el clúster para que caret lo use
+registerDoParallel(cl)
+
+# Confirmar
+getDoParWorkers()
+
+#======================================================
 ctrl <- trainControl(method = "cv", number = 5, classProbs = TRUE, summaryFunction = fiveStats, savePredictions = TRUE)
 
 
 set.seed(2050)  # Fijamos semilla para reproducibilidad
 
 p_load("ranger")
+cat("Entrenando modelo con", getDoParWorkers(), "núcleos...\n")
+start_time <- Sys.time()
 tree_ranger_grid <-train (
     Pobre ~ . ,  # Fórmula del modelo
     data = train_use,  # Dataset de entrenamiento
@@ -207,7 +247,35 @@ tree_ranger_grid <-train (
     metric = "F",  # Optimiza la métrica de F
     num.trees = 200
 )
+end_time <- Sys.time()
+cat("Tiempo total de entrenamiento:", round(difftime(end_time, start_time, units = "mins"), 2), "minutos\n")
+stopCluster(cl)
+registerDoSEQ()
 tree_ranger_grid
+
+#PR + F1 Construction
+
+# Predicción sobre el conjunto de entrenamiento
+train_pred <- predict(tree_ranger_grid, newdata = train_use, type = "raw")
+
+# Asegurar que las clases estén en el mismo formato
+train_pred <- factor(train_pred, levels = c("no_pobre", "pobre"))
+true_labels <- train_use$Pobre
+
+# Calcular métricas
+tp <- sum(train_pred == "pobre" & true_labels == "pobre")
+fp <- sum(train_pred == "pobre" & true_labels != "pobre")
+fn <- sum(train_pred != "pobre" & true_labels == "pobre")
+
+precision <- ifelse(tp + fp == 0, 0, tp / (tp + fp))
+recall    <- ifelse(tp + fn == 0, 0, tp / (tp + fn))
+f1_score  <- ifelse(precision + recall == 0, 0, 2 * precision * recall / (precision + recall))
+
+# Mostrar resultados
+cat(sprintf("Precision: %.4f\n", precision))
+cat(sprintf("Recall:    %.4f\n", recall))
+cat(sprintf("F1 Score:  %.4f\n", f1_score))
+
 
 
 test_RF<- test_final  %>% mutate(pobre_hat_ranger=predict(tree_ranger_grid,newdata = test_final, type = "raw"))
@@ -255,12 +323,29 @@ write_csv(kaggle_sub, here::here("stores", nombre_archivoRF))
 
 #F1 = 0.68
 
+# ============= Preparar Paralelización ===============
+
+# Detectar el número de núcleos disponibles
+n_cores <- detectCores() - 4  # deja 1 libre para el sistema
+
+# Crear el clúster
+cl <- makeCluster(n_cores)
+
+# Registrar el clúster para que caret lo use
+registerDoParallel(cl)
+
+# Confirmar
+getDoParWorkers()
+
+#======================================================
 ctrl <- trainControl(method = "cv", number = 5, classProbs = TRUE, summaryFunction = fiveStats, savePredictions = TRUE)
 
 
 set.seed(2050)  # Fijamos semilla para reproducibilidad
 
 p_load("ranger")
+cat("Entrenando modelo con", getDoParWorkers(), "núcleos...\n")
+start_time <- Sys.time()
 tree_ranger_grid <-train (
     Pobre ~ . ,  # Fórmula del modelo
     data = train_use,  # Dataset de entrenamiento
@@ -274,14 +359,18 @@ tree_ranger_grid <-train (
     metric = "F",  # Optimiza la métrica de F
     num.trees = 200
 )
+end_time <- Sys.time()
+cat("Tiempo total de entrenamiento:", round(difftime(end_time, start_time, units = "mins"), 2), "minutos\n")
+stopCluster(cl)
+registerDoSEQ()
 tree_ranger_grid
 
 p_load("pROC") # Paquete para calcular y visualizar curvas ROC
 
 roc_obj_en<-roc(response=tree_ranger_grid$pred$obs,  # Valores reales de la variable objetivo
                    predictor=tree_ranger_grid$pred$pobre, # Probabilidades predichas por el modelo
-                  levels = c("no_pobre", "pobre"),  # # Establece la referencia control y caso (empleado = negativo, desempleado = positivo) 
-                  direction = "<")  # "<" significa que "desempleado" es positivo
+                  levels = c("no_pobre", "pobre"),  # # Establece la referencia control y caso (no pobre = negativo, pobre = positivo) 
+                  direction = "<")  # "<" significa que "pobre" es positivo
      
 prec_recall<-data.frame(coords(roc_obj_en, seq(0,1,length=100), ret=c("threshold", "precision", "recall")))
 prec_recall
@@ -291,7 +380,37 @@ prec_recall
 
 prec_recall$threshold[which.max(prec_recall$F1)]
 
-# Predicción de probabilidad de desempleo
+#PR + F1 Construction
+
+# Obtener las probabilidades de la clase "pobre" en el conjunto de entrenamiento
+train_prob <- predict(tree_ranger_grid, newdata = train_use, type = "prob")[, "pobre"]
+
+# Umbral de decisión
+th <- prec_recall$threshold[which.max(prec_recall$F1)]
+
+# Predicción binaria
+train_pred <- ifelse(train_prob >= th, "pobre", "no_pobre")
+train_pred <- factor(train_pred, levels = c("no_pobre", "pobre"))
+
+# Etiquetas verdaderas
+true_labels <- train_use$Pobre
+
+# Calcular métricas
+tp <- sum(train_pred == "pobre" & true_labels == "pobre")
+fp <- sum(train_pred == "pobre" & true_labels != "pobre")
+fn <- sum(train_pred != "pobre" & true_labels == "pobre")
+
+precision <- ifelse(tp + fp == 0, 0, tp / (tp + fp))
+recall    <- ifelse(tp + fn == 0, 0, tp / (tp + fn))
+f1_score  <- ifelse(precision + recall == 0, 0, 2 * precision * recall / (precision + recall))
+
+# Mostrar resultados
+cat(sprintf("Precision: %.4f\n", precision))
+cat(sprintf("Recall:    %.4f\n", recall))
+cat(sprintf("F1 Score:  %.4f\n", f1_score))
+
+
+# Predicción de probabilidad de pobre
 test_RFPR<- test_final  %>% mutate(pobre_hat_ranger=predict(tree_ranger_grid,newdata = test_final, type = "prob"))
 
 # Clasificación según el umbral óptimo de F1
@@ -348,7 +467,7 @@ write_csv(kaggle_sub, here::here("stores", nombre_archivoRF))
 
 #F1 = 0.69
 
-##Nueva imputación
+##Nueva imputación (IMPORTANTE CORRER NUEVAMENTE LAS BASES Y EL MANEJO DE DATOS HASTA LA IMPUTACIÓN ANTERIOR, DESDE AHÍ CONTINUAR CON ESTE CÓDIGO)
 # Numéricas_0 -> mediana
 for (v in num_vars) {
   train_use[[v]][is.na(train_use[[v]])] <- 0
@@ -368,11 +487,29 @@ test_final$pos_ocup_jefe[is.na(test_final$pos_ocup_jefe)] <- "0"
 
 train_use <- droplevels(train_use)
 
+# ============= Preparar Paralelización ===============
+
+# Detectar el número de núcleos disponibles
+n_cores <- detectCores() - 4  # deja 1 libre para el sistema
+
+# Crear el clúster
+cl <- makeCluster(n_cores)
+
+# Registrar el clúster para que caret lo use
+registerDoParallel(cl)
+
+# Confirmar
+getDoParWorkers()
+
+#======================================================
+
 ctrl <- trainControl(method = "cv", number = 5, classProbs = TRUE, summaryFunction = fiveStats, savePredictions = TRUE)
 
 set.seed(2050)  # Fijamos semilla para reproducibilidad
 
 p_load("ranger")
+cat("Entrenando modelo con", getDoParWorkers(), "núcleos...\n")
+start_time <- Sys.time()
 tree_ranger_grid <-train (
     Pobre ~ . ,  # Fórmula del modelo
     data = train_use,  # Dataset de entrenamiento
@@ -386,17 +523,19 @@ tree_ranger_grid <-train (
     metric = "F",  # Optimiza la métrica de F
     num.trees = 200
 )
+end_time <- Sys.time()
+cat("Tiempo total de entrenamiento:", round(difftime(end_time, start_time, units = "mins"), 2), "minutos\n")
+stopCluster(cl)
+registerDoSEQ()
 tree_ranger_grid
 
-
-hola=varImp(tree_ranger_grid)
 
 p_load("pROC") # Paquete para calcular y visualizar curvas ROC
 
 roc_obj_en<-roc(response=tree_ranger_grid$pred$obs,  # Valores reales de la variable objetivo
                    predictor=tree_ranger_grid$pred$pobre, # Probabilidades predichas por el modelo
-                  levels = c("no_pobre", "pobre"),  # # Establece la referencia control y caso (empleado = negativo, desempleado = positivo) 
-                  direction = "<")  # "<" significa que "desempleado" es positivo
+                  levels = c("no_pobre", "pobre"),  # # Establece la referencia control y caso (no pobre = negativo, pobre = positivo) 
+                  direction = "<")  # "<" significa que "pobre" es positivo
      
 prec_recall<-data.frame(coords(roc_obj_en, seq(0,1,length=100), ret=c("threshold", "precision", "recall")))
 prec_recall
@@ -406,7 +545,38 @@ prec_recall
 
 prec_recall$threshold[which.max(prec_recall$F1)]
 
-# Predicción de probabilidad de desempleo
+#PR + F1 Construction
+
+# Obtener las probabilidades de la clase "pobre" en el conjunto de entrenamiento
+train_prob <- predict(tree_ranger_grid, newdata = train_use, type = "prob")[, "pobre"]
+
+# Umbral de decisión
+th <- prec_recall$threshold[which.max(prec_recall$F1)]
+
+
+# Predicción binaria
+train_pred <- ifelse(train_prob >= th, "pobre", "no_pobre")
+train_pred <- factor(train_pred, levels = c("no_pobre", "pobre"))
+
+# Etiquetas verdaderas
+true_labels <- train_use$Pobre
+
+# Calcular métricas
+tp <- sum(train_pred == "pobre" & true_labels == "pobre")
+fp <- sum(train_pred == "pobre" & true_labels != "pobre")
+fn <- sum(train_pred != "pobre" & true_labels == "pobre")
+
+precision <- ifelse(tp + fp == 0, 0, tp / (tp + fp))
+recall    <- ifelse(tp + fn == 0, 0, tp / (tp + fn))
+f1_score  <- ifelse(precision + recall == 0, 0, 2 * precision * recall / (precision + recall))
+
+# Mostrar resultados
+cat(sprintf("Precision: %.4f\n", precision))
+cat(sprintf("Recall:    %.4f\n", recall))
+cat(sprintf("F1 Score:  %.4f\n", f1_score))
+
+
+# Predicción de probabilidad de pobre
 test_RFPR<- test_final  %>% mutate(pobre_hat_ranger=predict(tree_ranger_grid,newdata = test_final, type = "prob"))
 
 # Clasificación según el umbral óptimo de F1
@@ -892,7 +1062,7 @@ tree_ranger_grid <-train (
         min.node.size = c(30, 50)  # Tamaño mínimo de nodos terminales
     ),
     metric = "F",  # Optimiza la métrica de F
-    num.trees = 200,
+    num.trees = 200#,
     importance = "permutation" 
 )
 end_time <- Sys.time()
@@ -906,8 +1076,8 @@ p_load("pROC") # Paquete para calcular y visualizar curvas ROC
 
 roc_obj_en<-roc(response=tree_ranger_grid$pred$obs,  # Valores reales de la variable objetivo
                    predictor=tree_ranger_grid$pred$pobre, # Probabilidades predichas por el modelo
-                  levels = c("no_pobre", "pobre"),  # # Establece la referencia control y caso (empleado = negativo, desempleado = positivo) 
-                  direction = "<")  # "<" significa que "desempleado" es positivo
+                  levels = c("no_pobre", "pobre"),  # # Establece la referencia control y caso (no pobre = negativo, pobre = positivo) 
+                  direction = "<")  # "<" significa que "pobre" es positivo
      
 prec_recall<-data.frame(coords(roc_obj_en, seq(0,1,length=100), ret=c("threshold", "precision", "recall")))
 prec_recall
@@ -917,7 +1087,37 @@ prec_recall
 
 prec_recall$threshold[which.max(prec_recall$F1)]
 
-# Predicción de probabilidad de desempleo
+#PR + F1 Construction
+
+# Obtener las probabilidades de la clase "pobre" en el conjunto de entrenamiento
+train_prob <- predict(tree_ranger_grid, newdata = train_use, type = "prob")[, "pobre"]
+
+# Umbral de decisión
+th <- prec_recall$threshold[which.max(prec_recall$F1)]
+
+# Predicción binaria
+train_pred <- ifelse(train_prob >= th, "pobre", "no_pobre")
+train_pred <- factor(train_pred, levels = c("no_pobre", "pobre"))
+
+# Etiquetas verdaderas
+true_labels <- train_use$Pobre
+
+# Calcular métricas
+tp <- sum(train_pred == "pobre" & true_labels == "pobre")
+fp <- sum(train_pred == "pobre" & true_labels != "pobre")
+fn <- sum(train_pred != "pobre" & true_labels == "pobre")
+
+precision <- ifelse(tp + fp == 0, 0, tp / (tp + fp))
+recall    <- ifelse(tp + fn == 0, 0, tp / (tp + fn))
+f1_score  <- ifelse(precision + recall == 0, 0, 2 * precision * recall / (precision + recall))
+
+# Mostrar resultados
+cat(sprintf("Precision: %.4f\n", precision))
+cat(sprintf("Recall:    %.4f\n", recall))
+cat(sprintf("F1 Score:  %.4f\n", f1_score))
+
+
+# Predicción de probabilidad de pobre
 test_RFPR<- test_final %>% mutate(pobre_hat_ranger=predict(tree_ranger_grid,newdata = test_final, type = "prob")) 
 
 # Clasificación según el umbral óptimo de F1
@@ -1017,7 +1217,7 @@ ggplot(data.frame(x, y), aes(x, y)) +
 df_vi <- df_vi[df_vi$importance > 9, ]
 
 # Crear vector de variables importantes
-vars_imp <- df_vi$feature
+vars_imp <- c("horasxpropocc", "ingreso_por_activos", "meanedu_x_propocc", "propocc_x_lp", "prop_occ_nper", "P5130", "horasxedu_occ", "Npersug", "edu_occ_lp", "tam_emp_prom_occ", "mean_edu_occ", "Nper", "n_personas", "prom_horas_occ", "propocc_x_prest", "prop_occ_pet", "prestaciones", "prop_prest_occ", "n_no_pet_flex", "edad_jefe2", "edad_prom_occ2", "prop_ina_nper", "cotiza_pens_jefe2", "horas_jefe", "P5140", "prop_occ_pet_flex", "edad_jefe", "antig_prom_occ", "edad_prom_occ", "prop_no_pet_nper", "antig_jefe", "Lp", "tam_emp_jefe", "jefe_max_edu_years", "P5000", "n_occ") #df_vi$feature
 
 # Para train_use
 vars_imp_existentes <- vars_imp[vars_imp %in% names(train_use)]
@@ -1071,14 +1271,14 @@ tree_ranger_grid <-train (
     num.trees = 200 
 )
 
-tree_ranger_grid
+M_IV_RF=tree_ranger_grid
 
 p_load("pROC") # Paquete para calcular y visualizar curvas ROC
 
 roc_obj_en<-roc(response=tree_ranger_grid$pred$obs,  # Valores reales de la variable objetivo
                    predictor=tree_ranger_grid$pred$pobre, # Probabilidades predichas por el modelo
-                  levels = c("no_pobre", "pobre"),  # # Establece la referencia control y caso (empleado = negativo, desempleado = positivo) 
-                  direction = "<")  # "<" significa que "desempleado" es positivo
+                  levels = c("no_pobre", "pobre"),  # # Establece la referencia control y caso (no pobre = negativo, pobre = positivo) 
+                  direction = "<")  # "<" significa que "pobre" es positivo
      
 prec_recall<-data.frame(coords(roc_obj_en, seq(0,1,length=100), ret=c("threshold", "precision", "recall")))
 prec_recall
@@ -1088,8 +1288,39 @@ prec_recall
 
 prec_recall$threshold[which.max(prec_recall$F1)]
 
-# Predicción de probabilidad de desempleo
+# Predicción de probabilidad de pobre
 test_RFPR<- test_final %>% mutate(pobre_hat_ranger=predict(tree_ranger_grid,newdata = test_final, type = "prob")) 
+
+#PR + F1 Construction
+
+# Obtener las probabilidades de la clase "pobre" en el conjunto de entrenamiento
+train_prob <- predict(tree_ranger_grid, newdata = train_use, type = "prob")[, "pobre"]
+
+# Umbral de decisión
+th <- prec_recall$threshold[which.max(prec_recall$F1)]
+
+
+# Predicción binaria
+train_pred <- ifelse(train_prob >= th, "pobre", "no_pobre")
+train_pred <- factor(train_pred, levels = c("no_pobre", "pobre"))
+
+# Etiquetas verdaderas
+true_labels <- train_use$Pobre
+
+# Calcular métricas
+tp <- sum(train_pred == "pobre" & true_labels == "pobre")
+fp <- sum(train_pred == "pobre" & true_labels != "pobre")
+fn <- sum(train_pred != "pobre" & true_labels == "pobre")
+
+precision <- ifelse(tp + fp == 0, 0, tp / (tp + fp))
+recall    <- ifelse(tp + fn == 0, 0, tp / (tp + fn))
+f1_score  <- ifelse(precision + recall == 0, 0, 2 * precision * recall / (precision + recall))
+
+# Mostrar resultados
+cat(sprintf("Precision: %.4f\n", precision))
+cat(sprintf("Recall:    %.4f\n", recall))
+cat(sprintf("F1 Score:  %.4f\n", f1_score))
+
 
 # Clasificación según el umbral óptimo de F1
 test_RFPR <- test_RFPR %>%

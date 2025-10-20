@@ -1,0 +1,748 @@
+---
+title: "Others"
+author: "G4"
+date: "2025-10-12"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(pacman)
+
+p_load(rio, # Import/export data.
+       tidyverse, # Tidy-data.
+       stargazer, # Descriptive statistics.
+       gt, # Descriptive statistics.
+       gtsummary,
+       caret, # For predictive model assessment.
+       gridExtra, # Arrange plots.
+       skimr, # Summarize data.
+       here, #for file searching
+       readr, #for opening files
+       ggplot2,
+       boot,
+       scales,
+       car,
+       dplyr,
+       tidyr,
+       MLmetrics,
+       glmnet,
+       pROC,
+       rpart,
+       gbm,
+       lightgbm,
+       tibble
+       )
+```
+
+```{r}
+# Carga de bases de datos originales
+ruta1 <- here("stores", "train_hogares.csv")
+df_train_hogares <- read_csv(ruta1)
+
+ruta2 <- here("stores", "train_personas.csv")
+df_train_personas <- read_csv(ruta2)
+
+ruta3 <- here("stores", "test_personas.csv")
+df_test_personas <- read_csv(ruta3)
+
+ruta4 <- here("stores", "test_hogares.csv")
+df_test_hogares <- read_csv(ruta4)
+
+
+df_train_hogares      <- as_tibble(df_train_hogares)
+df_train_personas     <- as_tibble(df_train_personas)
+df_test_personas      <- as_tibble(df_test_personas)
+df_test_hogares       <- as_tibble(df_test_hogares)
+
+
+```
+
+```{r}
+
+# Create new variables at individual level
+# Function to create years of education
+add_edu_years <- function(df) {
+  df$edu_years <- ifelse(
+    df$P6210 %in% c(1, 2, 9), 0, # None, Preschool, Unknown → 0
+    ifelse(
+      df$P6210 %in% c(3, 4, 5), df$P6210s1, # Primary or Secondary → as is
+      ifelse(df$P6210 == 6, df$P6210s1 + 11, NA_real_) # Tertiary → add 11
+    )
+  )
+  df
+}
+
+
+# Function to create years of experience (Mincer-style proxy)
+# exp = age - edu_years - 6
+add_experience <- function(df) {
+  df$exp <- df$P6040 - df$edu_years - 6
+  df
+}
+
+# Function to Manage NA's on labor indicators
+fill_labor_nas <- function(df) {
+  vars <- c("Pet", "Oc", "Des", "Ina")
+  df %>%
+    mutate(across(all_of(vars), ~ as.integer(replace(., is.na(.), 0L))))
+}
+
+# Define PET_flexible (Urbano: 15–64 años; Rural: 12–69 años)
+add_pet_flexible <- function(df) {
+  df$PET_flexible <- ifelse(
+    is.na(df$P6040), NA_integer_,
+    ifelse(
+      df$Clase == 1,                           # Urbano
+      ifelse(df$P6040 >= 15 & df$P6040 <= 64, 1L, 0L),
+      ifelse(df$P6040 >= 12 & df$P6040 <= 69, 1L, 0L) # Rural
+    )
+  )
+  df
+}
+
+
+# Apply functiona to Train and Test
+df_train_personas <- add_edu_years(df_train_personas)
+df_test_personas  <- add_edu_years(df_test_personas)
+
+df_train_personas <- add_experience(df_train_personas)
+df_test_personas  <- add_experience(df_test_personas)
+
+df_train_personas <- fill_labor_nas(df_train_personas)
+df_test_personas  <- fill_labor_nas(df_test_personas)
+
+df_train_personas <- add_pet_flexible(df_train_personas)
+df_test_personas  <- add_pet_flexible(df_test_personas)
+```
+
+
+```{r}
+# Agreggate variables to household level
+agg_personas_to_hogares_plus_2 <- function(df_personas) {
+
+  # Helpers para robustez numérica
+  safe_div <- function(a, b) ifelse(is.na(b) | b <= 0, 0, a / b)
+
+  df_personas %>%
+    group_by(id) %>%
+    summarise(
+      # ===== BASE DE CONTEOS ===================================================
+      n_personas = n(),
+      n_occ      = sum(Oc  == 1, na.rm = TRUE),
+      n_des      = sum(Des == 1, na.rm = TRUE),
+      n_ina      = sum(Ina == 1, na.rm = TRUE),
+      n_pet      = sum(Pet == 1, na.rm = TRUE),
+
+      # ===== PET flexible ===
+      n_pet_flex        = sum(PET_flexible == 1, na.rm = TRUE),
+      n_no_pet_flex     = n_personas - n_pet_flex,
+      n_occ_in_pet_flex = sum(Oc == 1 & PET_flexible == 1, na.rm = TRUE),
+
+
+      # ===== COMPOSICIÓN / PROPORCIONES (LEGADO + NUEVAS) =====================
+      prop_occ_nper     = safe_div(n_occ, n_personas),
+      prop_des_nper     = safe_div(n_des, n_personas),         # NUEVA
+      prop_ina_nper     = safe_div(n_ina, n_personas),         # NUEVA
+      prop_no_pet_nper  = safe_div(n_no_pet_flex, n_personas), # NUEVA (PET flexible)
+      prop_occ_pet      = safe_div(n_occ, n_pet),              # LEGADO (PET original)
+      prop_occ_pet_flex = safe_div(n_occ_in_pet_flex, n_pet_flex), # NUEVA (PET flexible)
+
+      # ===== JEFE DEL HOGAR: CARACTERÍSTICAS ==================================
+      edad_jefe       = dplyr::first(P6040[P6050 == 1]),
+      sexo_jefe       = dplyr::first(P6020[P6050 == 1]),
+      tam_emp_jefe    = dplyr::coalesce(dplyr::first(P6870[P6050 == 1]), 0),
+      cotiza_pens_jefe= dplyr::coalesce(dplyr::first(P6920[P6050 == 1]), 0),
+      pos_ocup_jefe   = dplyr::coalesce(dplyr::first(P6430[P6050 == 1]), 0),
+      antig_jefe      = dplyr::coalesce(dplyr::first(P6426[P6050 == 1]), 0), # si NA -> 0
+      jefe_max_edu    = max(P6210[P6050 == 1], na.rm = TRUE),  # LEGADO (cód. educ. máx.)
+      jefe_max_edu_years = {
+        val <- max(P6210[P6050 == 1], na.rm = TRUE)
+        if (is.finite(val)) val else 0
+      },
+
+      # Indicadores del jefe
+      jefe_ocupado     = as.integer(any(P6050 == 1 & Oc == 1, na.rm = TRUE)),
+      prestaciones_jefe= as.integer(any(P6050 == 1 &
+                                  (P6510 == 1 | P6545 == 1 | P6580 == 1 |
+                                   P6630s1 == 1 | P6630s2 == 1 | P6630s3 == 1 |
+                                   P6630s4 == 1 | P6630s6 == 1),
+                                  na.rm = TRUE)),
+      horas_jefe       = ifelse(any(P6050 == 1 & Oc == 1, na.rm = TRUE),
+                                dplyr::first(P6800[P6050 == 1 & Oc == 1]), 0),
+
+      # ===== CALIDAD DEL EMPLEO (HOGAR) =======================================
+      prestaciones = as.integer(
+        any(P6510 == 1, na.rm = TRUE) |
+        any(P6545 == 1, na.rm = TRUE) |
+        any(P6580 == 1, na.rm = TRUE) |
+        any(P6630s1 == 1, na.rm = TRUE) |
+        any(P6630s2 == 1, na.rm = TRUE) |
+        any(P6630s3 == 1, na.rm = TRUE) |
+        any(P6630s4 == 1, na.rm = TRUE) |
+        any(P6630s6 == 1, na.rm = TRUE)   # (prioriza versión LEGADA)
+      ),
+
+      prop_prest_occ = if (n_occ > 0) {
+        mean(
+          (P6510 == 1 | P6545 == 1 | P6580 == 1 | P6630s1 == 1 | P6630s2 == 1 | P6630s3 == 1 | P6630s4 == 1 | P6630s6 == 1)[Oc == 1],
+          na.rm = TRUE
+          )
+        } else 0,
+
+      # ===== HORAS Y TAMAÑOS (ENTRE OCUPADOS) =================================
+      prom_horas_occ  = ifelse(n_occ > 0, mean(P6800[Oc == 1], na.rm = TRUE), 0), # alias LEGADO
+      tam_emp_prom_occ= ifelse(n_occ > 0, mean(P6870[Oc == 1], na.rm = TRUE), 0),
+
+      # ===== ANTIGÜEDAD / EDUCACIÓN / EDAD (ENTRE OCUPADOS) ===================
+      antig_prom_occ  = ifelse(n_occ > 0, mean(P6426[Oc == 1], na.rm = TRUE), 0),
+      mean_edu_occ    = ifelse(n_occ > 0, mean(edu_years[Oc == 1], na.rm = TRUE), 0),
+      edad_prom_occ   = ifelse(n_occ > 0, mean(P6040[Oc == 1], na.rm = TRUE), 0),
+
+      # ===== SEGUNDO TRABAJO ===================================================
+      segundo_trabajo_hogar   = as.integer(any(P7040 == 1, na.rm = TRUE)),
+      horas_segundo_trabajo_prom = ifelse(any(P7040 == 1, na.rm = TRUE),
+                                          mean(P7045[P7040 == 1], na.rm = TRUE), 0),
+
+      # ===== DESOCUPACIÓN CON INGRESOS (CLASIFICACIÓN) ========================
+      n_desoc_con_ingresos   = sum(Des == 1 & (P7422 == 1 | P7472 == 1), na.rm = TRUE),
+
+      desoc_con_ingresos_cat_chr = dplyr::case_when(
+        n_des == 0 ~ "sin_desocupados",
+        n_des > 0 & n_desoc_con_ingresos > 0 ~ "desoc_con_ingresos",
+        n_des > 0 & n_desoc_con_ingresos == 0 ~ "desoc_sin_ingresos",
+        TRUE ~ "sin_desocupados"
+      ),
+
+      # ===== TRABAJO INFANTIL / MAYORES (AGREGADO HOGAR) ======================
+      has_child_work_no_study = any(Clase == 1 & P6040 >= 10 & P6040 <= 14 &
+                                    Oc == 1 & P6240 != 3, na.rm = TRUE),
+      has_child_work_study    = any(Clase == 1 & P6040 >= 10 & P6040 <= 14 &
+                                    Oc == 1 & P6240 == 3, na.rm = TRUE),
+      child_work_cat_chr = dplyr::case_when(
+        has_child_work_no_study ~ "work_no_study",
+        has_child_work_study    ~ "work_study",
+        TRUE ~ "none"
+      ),
+      has_senior_calificado   = any(P6040 >= 65 & Oc == 1 & edu_years >= 16, na.rm = TRUE),
+      has_senior_no_cal       = any(P6040 >= 65 & Oc == 1 & edu_years < 16, na.rm = TRUE),
+      senior_work_cat_chr = dplyr::case_when(
+        has_senior_calificado ~ "calificado",
+        has_senior_no_cal     ~ "no_calificado",
+        TRUE ~ "none"
+      ),
+
+      # ===== INGRESOS NO LABORALES (INDICADORES) ===============================
+      ingreso_por_activos = as.integer(any(P7495 == 1 | P7500s2 == 1 | P7510s5 == 1, na.rm = TRUE)),
+      ingreso_otros       = as.integer(any(P7505 == 1 | P7510s7 == 1, na.rm = TRUE)),
+      ingreso_ayudas      = as.integer(any(P7510s1 == 1 | P7510s2 == 1 | P7510s3 == 1 |
+                                           P7500s3 == 1 | P7510s7 == 1, na.rm = TRUE)),
+
+      .groups = "drop"
+    ) %>%
+    mutate(
+      # ===== FACTORES CON NIVELES EXPLÍCITOS ==================================
+      desoc_con_ingresos_cat = factor(desoc_con_ingresos_cat_chr,
+                                      levels = c("sin_desocupados", "desoc_con_ingresos", "desoc_sin_ingresos")),
+      child_work_cat  = factor(child_work_cat_chr,
+                               levels = c("none", "work_study", "work_no_study")),
+      senior_work_cat = factor(senior_work_cat_chr,
+                               levels = c("none", "calificado", "no_calificado"))
+    ) %>%
+    # ===== ORDEN FINAL DE COLUMNAS ============================================
+    dplyr::select(
+      # ID
+      id,
+      # Conteos
+      n_personas, n_occ, n_des, n_ina, n_pet,
+      n_pet_flex, n_no_pet_flex, n_occ_in_pet_flex,
+      # Composición
+      prop_occ_nper, prop_des_nper, prop_ina_nper,
+      prop_no_pet_nper, prop_occ_pet, prop_occ_pet_flex,
+      # Jefe del hogar
+      edad_jefe, sexo_jefe, tam_emp_jefe, cotiza_pens_jefe, pos_ocup_jefe,
+      antig_jefe, jefe_max_edu, jefe_max_edu_years, jefe_ocupado,
+      prestaciones_jefe, horas_jefe,
+      # Calidad del empleo
+      prestaciones, prop_prest_occ,
+      # Ocupados: horas, tamaño, antigüedad, educación y edad
+      prom_horas_occ, tam_emp_prom_occ, antig_prom_occ, mean_edu_occ, edad_prom_occ,
+      # Segundo trabajo
+      segundo_trabajo_hogar, horas_segundo_trabajo_prom,
+      # Desocupación
+      n_desoc_con_ingresos, desoc_con_ingresos_cat,
+      # Trabajo infantil y mayores
+      child_work_cat, senior_work_cat,
+      # Ingresos no laborales
+      ingreso_por_activos, ingreso_otros, ingreso_ayudas
+    )
+}
+
+
+# Aplicar al TRAIN: personas -> hogares
+train_agg <- agg_personas_to_hogares_plus_2(df_train_personas)
+train_hogares_enriquecido <- df_train_hogares %>% left_join(train_agg, by = "id")
+
+# Aplicar al TEST: personas -> hogares
+test_agg <- agg_personas_to_hogares_plus_2(df_test_personas)
+test_hogares_enriquecido  <- df_test_hogares  %>% left_join(test_agg,  by = "id")
+
+
+
+```
+
+```{r}
+# ============================================================
+# Variables base (las nuevas + básicas de hogar)
+# ============================================================
+
+vars <- c(
+  # ---- Variables base del hogar ----
+  "P5000","P5010","P5090","P5100","P5130","P5140",
+  "Nper","Npersug","Depto","Lp",
+
+  # ---- Conteos ----
+  "n_personas","n_occ","n_des","n_ina","n_pet",
+  "n_pet_flex","n_no_pet_flex","n_occ_in_pet_flex",
+
+  # ---- Composición ----
+  "prop_occ_nper","prop_des_nper","prop_ina_nper",
+  "prop_no_pet_nper","prop_occ_pet","prop_occ_pet_flex",
+
+  # ---- Jefe del hogar ----
+  "edad_jefe","sexo_jefe","tam_emp_jefe","cotiza_pens_jefe",
+  "pos_ocup_jefe","antig_jefe","jefe_max_edu",
+  "jefe_max_edu_years","jefe_ocupado",
+  "prestaciones_jefe","horas_jefe",
+
+  # ---- Calidad del empleo ----
+  "prestaciones","prop_prest_occ",
+
+  # ---- Ocupados (promedios del hogar) ----
+  "prom_horas_occ","tam_emp_prom_occ","antig_prom_occ",
+  "mean_edu_occ","edad_prom_occ",
+
+  # ---- Segundo trabajo ----
+  "segundo_trabajo_hogar","horas_segundo_trabajo_prom",
+
+  # ---- Desocupación ----
+  "n_desoc_con_ingresos","desoc_con_ingresos_cat",
+
+  # ---- Trabajo infantil y mayores ----
+  "child_work_cat","senior_work_cat",
+
+  # ---- Ingresos no laborales ----
+  "ingreso_por_activos","ingreso_otros","ingreso_ayudas")
+
+# ============================================================
+# Limpieza de duplicados después de los joins
+# ============================================================
+
+#train_hogares_enriquecido <- train_hogares_enriquecido %>%
+  #select(-ends_with(".x"), -ends_with(".y")) %>%
+  #distinct(id, .keep_all = TRUE)
+
+#test_hogares_enriquecido <- test_hogares_enriquecido %>%
+  #select(-ends_with(".x"), -ends_with(".y")) %>%
+  #distinct(id, .keep_all = TRUE)
+
+# ============================================================
+# Creación de interacciones y transformaciones
+# ============================================================
+
+train_hogares_enriquecido <- train_hogares_enriquecido %>%
+  mutate(
+    # ---- Potencias (efectos no lineales) ----
+    edad_jefe2       = edad_jefe^2,
+    edad_prom_occ2   = edad_prom_occ^2,
+
+    # ---- Interacciones originales ----
+    sexo_desocup     = sexo_jefe * prop_des_nper,
+    edu_occ_lp       = mean_edu_occ * Lp,
+    horasxedu_occ    = prom_horas_occ * mean_edu_occ,
+    horasxpropocc    = prom_horas_occ * prop_occ_nper,
+
+    # ---- Nuevas interacciones principales ----
+    meanedu_x_propocc = mean_edu_occ * prop_occ_nper,
+    propocc_x_lp      = prop_occ_nper * Lp,
+    propocc_x_prest   = prop_occ_nper * prop_prest_occ
+  )
+
+# ---- Replicar mutaciones para test ----
+test_hogares_enriquecido <- test_hogares_enriquecido %>%
+  mutate(
+    edad_jefe2       = edad_jefe^2,
+    edad_prom_occ2   = edad_prom_occ^2,
+    sexo_desocup     = sexo_jefe * prop_des_nper,
+    edu_occ_lp       = mean_edu_occ * Lp,
+    horasxedu_occ    = prom_horas_occ * mean_edu_occ,
+    horasxpropocc    = prom_horas_occ * prop_occ_nper,
+    meanedu_x_propocc = mean_edu_occ * prop_occ_nper,
+    propocc_x_lp      = prop_occ_nper * Lp,
+    propocc_x_prest   = prop_occ_nper * prop_prest_occ
+  )
+
+# ============================================================
+# Añadir nuevas al vector de variables
+# ============================================================
+
+vars <- c(
+  vars,
+  "edad_jefe2","edad_prom_occ2","sexo_desocup",
+  "edu_occ_lp","horasxedu_occ", "horasxpropocc",
+  "meanedu_x_propocc","propocc_x_lp","propocc_x_prest"
+)
+
+# ============================================================
+# Armar train/test finales para modelado
+# ============================================================
+library(dplyr)
+
+train_use <- train_hogares_enriquecido %>%
+  dplyr::select(Pobre, all_of(vars)) %>%
+  mutate(Pobre = factor(Pobre, levels = c(0, 1), labels = c("no_pobre", "pobre")))
+
+
+test_final <- test_hogares_enriquecido %>%
+  dplyr::select(all_of(vars))
+
+# ============================================================
+# Definir categóricas y numéricas
+# ============================================================
+
+# Categóricas
+cat_vars <- c(
+  "Depto","P5090",
+  "sexo_jefe","pos_ocup_jefe","cotiza_pens_jefe","jefe_max_edu",
+  "child_work_cat","senior_work_cat","desoc_con_ingresos_cat"
+)
+
+# Definir numéricas como todo lo demás
+num_vars <- setdiff(vars, cat_vars)
+
+# ---- Convertir tipo adecuadamente ----
+train_use[cat_vars]  <- lapply(train_use[cat_vars],  factor)
+test_final[cat_vars] <- lapply(test_final[cat_vars], as.character)
+
+# ---- Forzar conversión a numérico (maneja factors o caracteres)
+for (v in c("P5100","P5130","P5140")) {
+  train_use[[v]] <- as.numeric(as.character(train_use[[v]]))
+  test_final[[v]] <- as.numeric(as.character(test_final[[v]]))
+}
+
+# ============================================================
+# IMPUTACIÓN
+# ============================================================
+
+# 0 para numericas faltantes
+for (v in num_vars) {
+  train_use[[v]][is.na(train_use[[v]])] <- 0
+  test_final[[v]][is.na(test_final[[v]])] <- 0
+}
+
+# cotiza_pens_jefe: imputar NA a "2" (No)
+train_use$cotiza_pens_jefe[is.na(train_use$cotiza_pens_jefe)] <- "2"
+test_final$cotiza_pens_jefe[is.na(test_final$cotiza_pens_jefe)] <- "2"
+
+# ppos_ocup_jefe: crear nuevo nivel "0" y asignar a NA
+levels(train_use$pos_ocup_jefe) <- c(levels(train_use$pos_ocup_jefe), "0")
+levels(test_final$pos_ocup_jefe) <- c(levels(test_final$pos_ocup_jefe), "0")
+
+train_use$pos_ocup_jefe[is.na(train_use$pos_ocup_jefe)] <- "0"
+test_final$pos_ocup_jefe[is.na(test_final$pos_ocup_jefe)] <- "0"
+
+for (v in cat_vars) {
+  niveles <- union(levels(train_use[[v]]), unique(test_final[[v]]))
+  train_use[[v]] <- factor(train_use[[v]], levels = niveles)
+  test_final[[v]] <- factor(test_final[[v]], levels = niveles)
+}
+
+
+
+
+
+```
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+
+
+```{r}
+
+#########################################################
+####### LightGBM (Modelo con variables iniciales) ########
+#########################################################
+
+#F1 = 0.XX
+
+p_load(purrr,
+       furrr)
+
+# Subset de tus variables de entrada
+train_mat <- train_use[, vars]
+
+# Identificar columnas categóricas (factores o texto)
+cat_features <- names(train_mat)[sapply(train_mat, \(x) is.factor(x) || is.character(x))]
+
+# Convertirlas a factor explícitamente
+train_mat <- train_mat %>%
+  mutate(across(all_of(cat_features), as.factor))
+
+# Crear el dataset de LightGBM indicando las categóricas
+dtrain <- lgb.Dataset(
+  data = data.matrix(train_mat),   # data.matrix preserva los factores internamente
+  label = as.numeric(train_use$Pobre == "pobre"),
+  categorical_feature = cat_features
+)
+
+set.seed(2050)
+
+
+# ===============================================
+# 🧮 Grilla completa de hiperparámetros (sin cambios)
+# ===============================================
+lgbm_grid <- expand.grid(
+  num_leaves       = c(64, 128),
+  learning_rate    = c(0.01, 0.005),
+  nrounds          = c(1000, 1500, 2000),
+  max_depth        = c(6, 8),
+  min_data_in_leaf = c(20, 40, 60),
+  feature_fraction = c(0.7, 0.9),
+  bagging_fraction = c(0.6, 0.8),
+  lambda_l1        = c(0, 0.1),
+  lambda_l2        = c(0, 1),
+  bagging_freq     = 1
+)
+
+
+# ===============================================
+# ⚡ Función MODIFICADA para evaluar Y GUARDAR
+# ===============================================
+
+# Crea una carpeta para guardar los resultados parciales de forma segura
+dir.create("results_cache", showWarnings = FALSE)
+
+evaluate_and_save_combo <- function(i, grid, dtrain) {
+  
+  # Define el nombre del archivo de resultado para esta combinación
+  result_file <- file.path("results_cache", paste0("result_", i, ".rds"))
+  
+  # --- ¡CLAVE!: Si el archivo ya existe, se salta el cálculo. Proceso resumible. ---
+  if (file.exists(result_file)) {
+    # message(paste("Saltando combo", i, "- ya existe.")) # Descomentar para depurar
+    return(NULL)
+  }
+  
+  # Imprimir un mensaje de progreso
+  message(paste0("Procesando combo #", i, " de ", nrow(grid), "..."))
+  
+  # --- Lógica de LightGBM (casi sin cambios) ---
+  params_row <- grid[i, ]
+  params <- as.list(params_row)
+  
+  p <- list(
+    objective        = "binary",
+    metric           = "auc",
+    boosting_type    = "gbdt",
+    num_leaves       = params$num_leaves,
+    learning_rate    = params$learning_rate,
+    max_depth        = params$max_depth,
+    min_data_in_leaf = params$min_data_in_leaf,
+    feature_fraction = params$feature_fraction,
+    bagging_fraction = params$bagging_fraction,
+    bagging_freq     = params$bagging_freq,
+    lambda_l1        = params$lambda_l1,
+    lambda_l2        = params$lambda_l2,
+    scale_pos_weight = 4,
+    # --- ¡IMPORTANTE! Optimización de paralelización ---
+    # Cada worker de furrr manejará un proceso, y ese proceso usará 1 solo hilo.
+    # Esto evita la sobre-suscripción y es mucho más rápido.
+    num_threads      = 1,
+    feature_pre_filter = FALSE
+  )
+  
+  # Entrenar con validación cruzada (CV)
+  cv <- lgb.cv(
+    params                = p,
+    data                  = dtrain,
+    nrounds               = params$nrounds,
+    nfold                 = 5,
+    early_stopping_rounds = 100,
+    verbose               = 1 # Silenciar output de lgb.cv para una consola limpia
+  )
+  
+  best_auc <- max(unlist(cv$record_evals$valid$auc$eval))
+  
+  result_tibble <- as_tibble(params_row) %>%
+    mutate(
+      combo_id = i,
+      best_auc = best_auc,
+      best_iter = cv$best_iter
+    )
+  
+  # --- ¡CLAVE!: Guardar el resultado de esta combinación en su propio archivo ---
+  saveRDS(result_tibble, result_file)
+  
+  return(NULL) # La función ya guardó el resultado, no necesita devolver nada
+}
+
+
+# ===============================================
+# 🚀 EJECUCIÓN: Búsqueda Aleatoria y Paralela
+# ===============================================
+
+# --- 1. Definir la estrategia de paralelización ÓPTIMA ---
+# Usar todos los núcleos disponibles. Si tienes 14, usa 14.
+# Si quieres dejar algunos libres, reduce el número.
+n_cores <- 14 
+plan(multisession, workers = n_cores)
+message(paste("🚀 Iniciando búsqueda en paralelo con", n_cores, "workers..."))
+
+
+# --- 2. Seleccionar un SUBCONJUNTO ALEATORIO de la grilla ---
+# No tienes tiempo para 2304. Una muestra de 200-250 es excelente.
+set.seed(123) # Para que la muestra sea reproducible
+n_combos_to_try <- 250 
+indices_to_run <- sample(1:nrow(lgbm_grid), n_combos_to_try)
+
+
+# --- 3. Ejecutar la evaluación en paralelo ---
+# future_walk es ideal para funciones que se ejecutan por sus "side effects" (guardar archivos)
+# El ~ y .x es la sintaxis corta de purrr para una función anónima.
+future_walk(indices_to_run, ~evaluate_and_save_combo(.x, lgbm_grid, dtrain), .progress = TRUE)
+
+message("✅ Búsqueda paralela completada.")
+
+
+# ===============================================
+# 🏁 Recolectar, Ordenar y Mostrar Resultados
+# ===============================================
+# Este bloque se puede ejecutar en cualquier momento, incluso si la búsqueda
+# fue interrumpida, para ver los mejores resultados HASTA AHORA.
+
+message("Recolectando y analizando resultados...")
+
+# Leer todos los archivos .rds individuales de la carpeta de cache
+result_files <- list.files("results_cache", full.names = TRUE, pattern = "\\.rds$")
+
+# Usar map_dfr para leer y apilar todos los resultados en un único data frame
+results <- map_dfr(result_files, readRDS)
+
+if (nrow(results) > 0) {
+  results_sorted <- results %>%
+    select(combo_id, best_auc, best_iter, everything()) %>% # Reordenar columnas
+    arrange(desc(best_auc))
+  
+  print("🏆 Mejores 10 combinaciones encontradas:")
+  print(head(results_sorted, 10))
+  
+  # ¡YA TIENES A TU GANADOR!
+  # El siguiente paso sería tomar la primera fila de results_sorted,
+  # usar esos hiperparámetros para entrenar un modelo final con TODOS tus datos
+  # de entrenamiento y generar las predicciones para Kaggle.
+  
+} else {
+  warning("No se encontraron resultados. ¿Se completó alguna combinación?")
+}
+
+# Extraer mejor combinación
+mejores_params <- results_sorted[1, ]
+
+# Preparar parámetros
+final_params <- list(
+  objective        = "binary",
+  metric           = "auc",
+  boosting_type    = "gbdt",
+  num_leaves       = mejores_params$num_leaves,
+  learning_rate    = mejores_params$learning_rate,
+  max_depth        = mejores_params$max_depth,
+  min_data_in_leaf = mejores_params$min_data_in_leaf,
+  feature_fraction = mejores_params$feature_fraction,
+  bagging_fraction = mejores_params$bagging_fraction,
+  bagging_freq     = mejores_params$bagging_freq,
+  lambda_l1        = mejores_params$lambda_l1,
+  lambda_l2        = mejores_params$lambda_l2,
+  scale_pos_weight = 4,
+  num_threads      = 6
+)
+
+
+# Entrenar modelo final con todos los datos
+lgbm_fit <- lgb.train(
+  params = final_params,
+  data = dtrain,
+  nrounds = mejores_params$best_iter,
+  verbose = 1
+)
+
+
+```
+
+
+```{R}
+# ===============================================
+#  Optimización de umbral para F1 usando OOF
+# ===============================================
+# Asegúrate de que el modelo caret se llame lgbm_fit
+
+# ===============================================
+#  Optimización de umbral para F1 usando OOF
+# ===============================================
+oof <- lgbm_fit$pred
+stopifnot("pobre" %in% names(oof))
+
+thr_grid <- seq(0.01, 0.99, by = 0.01)
+f1_by_thr <- purrr::map_dfr(thr_grid, function(t) {
+  pred_cls <- ifelse(oof[["pobre"]] >= t, "pobre", "no_pobre")
+  pred_cls <- factor(pred_cls, levels = levels(oof$obs))
+  tp <- sum(pred_cls == "pobre" & oof$obs == "pobre")
+  fp <- sum(pred_cls == "pobre" & oof$obs != "pobre")
+  fn <- sum(pred_cls != "pobre" & oof$obs == "pobre")
+  precision <- ifelse(tp + fp == 0, 0, tp / (tp + fp))
+  recall    <- ifelse(tp + fn == 0, 0, tp / (tp + fn))
+  F1        <- ifelse(precision + recall == 0, 0, 2 * precision * recall / (precision + recall))
+  tibble(threshold = t, precision = precision, recall = recall, F1 = F1)
+})
+
+best_thr   <- arrange(f1_by_thr, desc(F1)) %>% slice(1)
+umbral_opt <- best_thr$threshold[1]
+cat(sprintf("F1 Score final (umbral %.2f): %.4f\n", umbral_opt, best_thr$F1))
+
+print(best_thr)
+
+# Calcular F1 final con umbral optimizado
+pred_cls_final <- ifelse(oof[["pobre"]] >= umbral_opt, "pobre", "no_pobre")
+pred_cls_final <- factor(pred_cls_final, levels = levels(oof$obs))
+
+tp <- sum(pred_cls_final == "pobre" & oof$obs == "pobre")
+fp <- sum(pred_cls_final == "pobre" & oof$obs != "pobre")
+fn <- sum(pred_cls_final != "pobre" & oof$obs == "pobre")
+
+precision <- ifelse(tp + fp == 0, 0, tp / (tp + fp))
+recall    <- ifelse(tp + fn == 0, 0, tp / (tp + fn))
+F1_final  <- ifelse(precision + recall == 0, 0, (2 * precision * recall) / (precision + recall))
+
+# Mostrar solo el F1
+cat(sprintf("F1 Score final (umbral %.2f): %.4f\n", umbral_opt, F1_final))
+
+
+# ===============================================
+#  Predicción en TEST y armado de submission
+# ===============================================
+
+test_prob <- predict(lgbm_fit, newdata = test_final, type = "prob")[, "pobre"]
+Pobre_pred <- as.integer(test_prob >= umbral_opt)
+
+id_test <- as.character(test_hogares_enriquecido$id)
+stopifnot(length(id_test) == length(Pobre_pred))
+
+kaggle_sub <- tibble::tibble(
+  id    = id_test,
+  Pobre = Pobre_pred
+)
+
+readr::write_csv(kaggle_sub, here::here("stores", "LGBM_F1_OPT.csv"))
+
+```
