@@ -120,6 +120,35 @@ modelo_logit <- train(
   na.action = na.omit
 )
 
+#PR + F1 Construction
+
+# Obtener las probabilidades de la clase "pobre" en el conjunto de entrenamiento
+train_prob <- predict(modelo_logit, newdata = train_use, type = "prob")[, "pobre"]
+
+# Umbral de decisión
+th <- 0.5
+
+# Predicción binaria
+train_pred <- ifelse(train_prob >= th, "pobre", "no_pobre")
+train_pred <- factor(train_pred, levels = c("no_pobre", "pobre"))
+
+# Etiquetas verdaderas
+true_labels <- train_use$Pobre
+
+# Calcular métricas
+tp <- sum(train_pred == "pobre" & true_labels == "pobre")
+fp <- sum(train_pred == "pobre" & true_labels != "pobre")
+fn <- sum(train_pred != "pobre" & true_labels == "pobre")
+
+precision <- ifelse(tp + fp == 0, 0, tp / (tp + fp))
+recall    <- ifelse(tp + fn == 0, 0, tp / (tp + fn))
+f1_score  <- ifelse(precision + recall == 0, 0, 2 * precision * recall / (precision + recall))
+
+# Mostrar resultados
+cat(sprintf("Precision: %.4f\n", precision))
+cat(sprintf("Recall:    %.4f\n", recall))
+cat(sprintf("F1 Score:  %.4f\n", f1_score))
+
 # predicción
 pred_prob <- predict(modelo_logit, newdata = test_final, type = "prob")
 
@@ -224,6 +253,35 @@ modelo_logit <- train(
   trControl = ctrl,
   na.action = na.omit
 )
+
+#PR + F1 Construction
+
+# Obtener las probabilidades de la clase "pobre" en el conjunto de entrenamiento
+train_prob <- predict(modelo_logit, newdata = train_use, type = "prob")[, "pobre"]
+
+# Umbral de decisión
+th <- 0.5
+
+# Predicción binaria
+train_pred <- ifelse(train_prob >= th, "pobre", "no_pobre")
+train_pred <- factor(train_pred, levels = c("no_pobre", "pobre"))
+
+# Etiquetas verdaderas
+true_labels <- train_use$Pobre
+
+# Calcular métricas
+tp <- sum(train_pred == "pobre" & true_labels == "pobre")
+fp <- sum(train_pred == "pobre" & true_labels != "pobre")
+fn <- sum(train_pred != "pobre" & true_labels == "pobre")
+
+precision <- ifelse(tp + fp == 0, 0, tp / (tp + fp))
+recall    <- ifelse(tp + fn == 0, 0, tp / (tp + fn))
+f1_score  <- ifelse(precision + recall == 0, 0, 2 * precision * recall / (precision + recall))
+
+# Mostrar resultados
+cat(sprintf("Precision: %.4f\n", precision))
+cat(sprintf("Recall:    %.4f\n", recall))
+cat(sprintf("F1 Score:  %.4f\n", f1_score))
 
 # 6) Predicción en TEST (prob y clase 0/1 con th=0.5)
 pred_prob <- predict(modelo_logit, newdata = test_final, type = "prob")
@@ -367,6 +425,36 @@ modelo_logit3 <- train(
   na.action = na.omit
 )
 
+#PR + F1 Construction
+
+# Obtener las probabilidades de la clase "pobre" en el conjunto de entrenamiento
+train_prob <- predict(modelo_logit3, newdata = train_use, type = "prob")[, "pobre"]
+
+# Umbral de decisión
+th <- 0.5
+
+# Predicción binaria
+train_pred <- ifelse(train_prob >= th, "pobre", "no_pobre")
+train_pred <- factor(train_pred, levels = c("no_pobre", "pobre"))
+
+# Etiquetas verdaderas
+true_labels <- train_use$Pobre
+
+# Calcular métricas
+tp <- sum(train_pred == "pobre" & true_labels == "pobre")
+fp <- sum(train_pred == "pobre" & true_labels != "pobre")
+fn <- sum(train_pred != "pobre" & true_labels == "pobre")
+
+precision <- ifelse(tp + fp == 0, 0, tp / (tp + fp))
+recall    <- ifelse(tp + fn == 0, 0, tp / (tp + fn))
+f1_score  <- ifelse(precision + recall == 0, 0, 2 * precision * recall / (precision + recall))
+
+# Mostrar resultados
+cat(sprintf("Precision: %.4f\n", precision))
+cat(sprintf("Recall:    %.4f\n", recall))
+cat(sprintf("F1 Score:  %.4f\n", f1_score))
+
+
 # ============================================================
 # Predicciones
 # ============================================================
@@ -422,6 +510,8 @@ modelo_EN_1<- train(
   )   
 )
 
+
+
 # ============================================================
 # Seleccionar el mejor Threshold interno
 # ============================================================
@@ -450,6 +540,36 @@ plot(umbrales, f1_scores, type = "b", pch = 19,
 
 best_th <- umbrales[which.max(f1_scores)]
 best_th
+
+#PR + F1 Construction
+
+# Obtener las probabilidades de la clase "pobre" en el conjunto de entrenamiento
+train_prob <- predict(modelo_EN_1, newdata = train_use, type = "prob")[, "pobre"]
+
+# Umbral de decisión
+th <- best_th
+
+# Predicción binaria
+train_pred <- ifelse(train_prob >= th, "pobre", "no_pobre")
+train_pred <- factor(train_pred, levels = c("no_pobre", "pobre"))
+
+# Etiquetas verdaderas
+true_labels <- train_use$Pobre
+
+# Calcular métricas
+tp <- sum(train_pred == "pobre" & true_labels == "pobre")
+fp <- sum(train_pred == "pobre" & true_labels != "pobre")
+fn <- sum(train_pred != "pobre" & true_labels == "pobre")
+
+precision <- ifelse(tp + fp == 0, 0, tp / (tp + fp))
+recall    <- ifelse(tp + fn == 0, 0, tp / (tp + fn))
+f1_score  <- ifelse(precision + recall == 0, 0, 2 * precision * recall / (precision + recall))
+
+# Mostrar resultados
+cat(sprintf("Precision: %.4f\n", precision))
+cat(sprintf("Recall:    %.4f\n", recall))
+cat(sprintf("F1 Score:  %.4f\n", f1_score))
+
 
 # ============================================================
 # Predicciones y exportación (Elastic Net) 
