@@ -286,11 +286,6 @@ write_csv(df_train_hogares, here::here("stores", "train_hogares_enriquecido_2.cs
 write_csv(df_test_hogares,  here::here("stores", "test_hogares_enriquecido_2.csv"))
 ```
 
-```{r}
-skim(df_train_hogares)
-```
-
-
 
 ```{r}
 

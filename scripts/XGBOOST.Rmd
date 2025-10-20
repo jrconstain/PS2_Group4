@@ -904,5 +904,58 @@ message("✅ Guardado en: ", out_dir)
 
 ```
 
+```{r}
+# 1) Importancia "clásica" de caret (ranking único)
+library(caret)
 
+imp <- varImp(xgb_f1, scale = FALSE)
+print(imp)
+plot(imp, top = 10)
+
+imp_df <- imp$importance %>%
+  as.data.frame() %>%
+  rownames_to_column("variable") %>%
+  arrange(dplyr::desc(Overall))    # si es binaria tendrás columna "Overall"
+
+write_csv(imp_df, here("stores", "xgboost_importancia_varImp.csv"))
+
+```
+
+```{r}
+# 1) Importancia
+library(caret)
+imp <- varImp(xgb_f1, scale = FALSE)
+
+# 2) Diccionario de etiquetas (edítalo a tu gusto)
+# 1) Crea el diccionario con otro nombre
+var_labels <- c(
+  "meanedu_x_propocc" = "Avg years of education (employed) × share employed in household",
+  "horasxpropocc"     = "Hours worked × share employed in household",
+  "ingreso_por_activos" = "Income from assets (household)",
+  "P5130"             = "Imputed/estimated rent (P5130)",
+  "propocc_x_prest"   = "Share employed × benefits",
+  "Npersug"           = "Number of persons in the spending unit (UG)",
+  "tam_emp_prom_occ"  = "Average firm size of the employed",
+  "Nper"              = "Number of persons in the household",
+  "Lp"                = "Poverty line (Lp)",
+  "P5140"             = "Rent paid (P5140)"
+)
+
+# 2) Reemplaza los rownames con fallback al original
+old_names <- rownames(imp$importance)
+new_names <- ifelse(old_names %in% names(var_labels), var_labels[old_names], old_names)
+rownames(imp$importance) <- new_names
+
+# 3) Grafica
+plot(imp, top = 10)
+
+# ruta (ajústala)
+out <- here::here("views", "xgb_importance_top10.png")
+
+png(filename = out, width = 1600, height = 900, res = 150)  # tamaño y DPI
+plot(imp, top = 10)                                         # tu plot
+
+
+
+```
 

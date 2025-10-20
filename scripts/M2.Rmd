@@ -1771,6 +1771,12 @@ message("Archivo guardado en: ", here::here("stores", nombre_archivoGBM))
 ```
 
 ```{r}
+
+```
+
+
+
+```{r}
 # ==========================================================
 # GUARDADO ROBUSTO DE RESULTADOS — GBM (V3 FULL VARS)
 # Requiere en memoria:

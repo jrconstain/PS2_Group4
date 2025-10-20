@@ -29,7 +29,8 @@ p_load(rio, # Import/export data.
        scales,
        car,
        dplyr,
-       tidyr
+       tidyr,
+       stringr
        )
 ```
 
@@ -405,7 +406,7 @@ test_final <- test_hogares_enriquecido %>%
 
 # Categóricas
 cat_vars <- c(
-  "Depto","P5000","P5010","P5090",
+  "Depto","P5090",
   "sexo_jefe","pos_ocup_jefe","cotiza_pens_jefe","jefe_max_edu",
   "child_work_cat","senior_work_cat","desoc_con_ingresos_cat"
 )
@@ -459,3 +460,241 @@ colSums(is.na(train_use))
 write_csv(train_use, here::here("stores", "train_hogares_enriquecido_final.csv"))
 write_csv(test_final,  here::here("stores", "test_hogares_enriquecido_final.csv"))
 ```
+
+
+
+
+
+## Estadísticas Descriptivas
+
+
+```{r}
+#Estructura de los data sets
+str(train_use)
+str(test_final)
+```
+
+```{r}
+# ============================================
+# TRAIN only — Poor vs Non-poor
+# Numéricas: mean (SE) | Categóricas: mode
+# Con etiquetas bonitas en filas (stargazer texto)
+# ============================================
+
+# -------- 0) Etiquetas "bonitas" (edítalas a tu gusto) --------
+var_labels <- c(
+  # Numéricas
+  Npersug          = "Número de personas de la unidad de gasto del hogar",
+  P5130            = "Arriendo imputado/estimado",
+  P5140            = "Canon de arriendo pagado",
+  Lp               = "Línea de pobreza",
+  edad_jefe        = "Edad del jefe del hogar",
+  horas_jefe       = "Horas trabajadas por el jefe del hogar",
+  n_occ            = "Número de ocupados en el hogar",
+  n_des            = "Número de desocupados en el hogar",
+  prom_horas_occ   = "Horas promedio trabajadas entre ocupados",
+  prop_occ_nper    = "Proporción de ocupados por número de personas en el hogar",
+
+  # Categóricas
+  P5090            = "Tenencia de la vivienda",
+  sexo_jefe        = "Sexo del jefe del hogar",
+  cotiza_pens_jefe = "Cotiza pensión (jefe/a)",
+  pos_ocup_jefe    = "Posición ocupacional del jefe del hogar",
+  jefe_max_edu     = "Educación máxima del jefe del hogar"
+)
+
+# -------- 1) Selección de variables --------
+num_vars <- c(
+  "Npersug","P5130","P5140","Lp",
+  "edad_jefe","horas_jefe","n_occ","n_des",
+  "prom_horas_occ","prop_occ_nper"
+)
+num_vars <- num_vars[num_vars %in% names(train_use)]
+
+cat_vars <- c("P5090","sexo_jefe","cotiza_pens_jefe","pos_ocup_jefe","jefe_max_edu")
+cat_vars <- cat_vars[cat_vars %in% names(train_use)]
+
+# -------- 2) Partir TRAIN en grupos --------
+train_poor    <- subset(train_use, Pobre == "pobre")
+train_nonpoor <- subset(train_use, Pobre == "no_pobre")
+
+# -------- 3) Helpers --------
+se_mean <- function(x) {
+  x <- x[!is.na(x)]
+  if (length(x) == 0) return(NA_real_)
+  stats::sd(x) / sqrt(length(x))
+}
+mode_simple <- function(x) {
+  x <- as.character(x)
+  x <- x[!is.na(x)]
+  if (length(x) == 0) return(NA_character_)
+  names(sort(table(x), decreasing = TRUE))[1]
+}
+map_label <- function(vnames) {
+  lab <- var_labels[vnames]
+  lab[is.na(lab)] <- vnames[is.na(lab)]
+  lab
+}
+
+# ============================
+# TABLA 1 — Numéricas: mean (SE)
+# ============================
+if (length(num_vars) > 0) {
+  # Poor
+  m_poor <- sapply(train_poor[ , num_vars, drop = FALSE], function(v) mean(v, na.rm = TRUE))
+  s_poor <- sapply(train_poor[ , num_vars, drop = FALSE], se_mean)
+  col_poor <- ifelse(is.na(m_poor), "", sprintf("%.3f (%.3f)", m_poor, s_poor))
+
+  # Non-poor
+  m_nonp <- sapply(train_nonpoor[ , num_vars, drop = FALSE], function(v) mean(v, na.rm = TRUE))
+  s_nonp <- sapply(train_nonpoor[ , num_vars, drop = FALSE], se_mean)
+  col_nonp <- ifelse(is.na(m_nonp), "", sprintf("%.3f (%.3f)", m_nonp, s_nonp))
+
+  tab_num <- data.frame(
+    Variable = map_label(num_vars),
+    Poor     = unname(col_poor),
+    `Non-poor` = unname(col_nonp),
+    check.names = FALSE,
+    row.names = NULL
+  )
+
+  # Mostrar en TEXTO
+  stargazer(tab_num, summary = FALSE, rownames = FALSE, type = "latex",
+            title = "TRAIN — Numeric variables: mean (SE) by poverty status")
+  # (Opcional) exportar a LaTeX
+  # stargazer(tab_num, summary = FALSE, rownames = FALSE, type = "latex",
+  #           title = "TRAIN — Numeric variables: mean (SE) by poverty status",
+  #           label = "tab:train_numeric_means_se",
+  #           out = "tables/train_numeric_means_se.tex")
+}
+
+# ============================
+# TABLA 2 — Categóricas: mode
+# ============================
+
+# Mapas de códigos -> etiquetas
+lbl_P5090 <- c(
+  "1"="Propia, totalmente pagada",
+  "2"="Propia, la están pagando",
+  "3"="En arriendo o subarriendo",
+  "4"="En usufructo",
+  "5"="Posesión sin título / propiedad colectiva",
+  "6"="Otra"
+)
+
+lbl_sexo <- c("1"="Hombre", "2"="Mujer")
+
+lbl_cotiza <- c(
+  "0"="No aplica / sin info",
+  "1"="Sí",
+  "2"="No",
+  "3"="Pensionado"
+)
+
+lbl_pos <- c(
+  "0"="No aplica / sin info",
+  "1"="Obrero/empleado empresa particular",
+  "2"="Obrero/empleado del gobierno",
+  "3"="Empleado doméstico",
+  "4"="Cuenta propia",
+  "5"="Patrón o empleador",
+  "6"="Trabajador familiar sin remuneración",
+  "7"="Trabajador sin remuneración en otros hogares",
+  "8"="Jornalero o peón",
+  "9"="Otro"
+)
+
+lbl_edu <- c(
+  "1"="Ninguno",
+  "2"="Preescolar",
+  "3"="Primaria",
+  "4"="Secundaria (básica)",
+  "5"="Media",
+  "6"="Superior / universitaria",
+  "7"="No sabe / no informa"
+)
+
+# Función simple para rotular (sin purrr)
+label_with_map <- function(x, map) {
+  y <- as.character(x)
+  y[ y %in% names(map) ] <- map[ y[ y %in% names(map) ] ]
+  factor(y)
+}
+
+# Crear columnas rotuladas
+train_use <- train_use |>
+  dplyr::mutate(
+    P5090_lbl          = label_with_map(P5090, lbl_P5090),
+    sexo_jefe_lbl      = label_with_map(sexo_jefe, lbl_sexo),
+    cotiza_pens_lbl    = label_with_map(cotiza_pens_jefe, lbl_cotiza),
+    pos_ocup_jefe_lbl  = label_with_map(pos_ocup_jefe, lbl_pos),
+    jefe_max_edu_lbl   = label_with_map(jefe_max_edu, lbl_edu)
+  )
+
+# ============================
+# TRAIN — Categorical variables: mode (label only)
+# ============================
+
+suppressPackageStartupMessages({
+  library(stargazer)
+})
+
+# Variables categóricas rotuladas
+cat_vars_lbl <- c("P5090_lbl","sexo_jefe_lbl","cotiza_pens_lbl","pos_ocup_jefe_lbl","jefe_max_edu_lbl")
+
+# Nombres bonitos para las filas
+row_labels <- c(
+  P5090_lbl         = "Tenencia de la vivienda",
+  sexo_jefe_lbl     = "Sexo del jefe del hogar",
+  cotiza_pens_lbl   = "Cotiza pensión (jefe/a)",
+  pos_ocup_jefe_lbl = "Posición ocupacional del jefe del hogar",
+  jefe_max_edu_lbl  = "Educación máxima del jefe del hogar"
+)
+
+# Subconjuntos
+train_poor    <- subset(train_use, Pobre == "pobre")
+train_nonpoor <- subset(train_use, Pobre == "no_pobre")
+
+# Moda (solo etiqueta)
+mode_label_only <- function(x) {
+  x <- as.character(x); x <- x[!is.na(x)]
+  if (length(x) == 0) return("")
+  tb <- table(x); names(tb)[which.max(tb)]
+}
+
+# Columnas Poor y Non-poor (solo etiquetas)
+col_poor  <- sapply(cat_vars_lbl, function(v) mode_label_only(train_poor[[v]]))
+col_nonp  <- sapply(cat_vars_lbl, function(v) mode_label_only(train_nonpoor[[v]]))
+
+# Data frame final
+tab_cat_labels <- data.frame(
+  Variable   = unname(row_labels[cat_vars_lbl]),
+  Poor       = unname(col_poor),
+  `Non-poor` = unname(col_nonp),
+  check.names = FALSE,
+  row.names = NULL
+)
+
+# Mostrar en texto con stargazer
+stargazer(tab_cat_labels, summary = FALSE, rownames = FALSE, type = "latex",
+          title = "TRAIN — Categorical variables: mode (label only) by poverty status")
+
+# (Opcional) exportar a LaTeX:
+# stargazer(tab_cat_labels, summary = FALSE, rownames = FALSE, type = "latex",
+#           title = "TRAIN — Categorical variables: mode (label only) by poverty status",
+#           label = "tab:train_categorical_mode_labels",
+#           out = "tables/train_categorical_mode_labels.tex")
+
+
+```
+
+```{r}
+#Desbalanceo
+ggplot(train_use, aes(x = Pobre, y = after_stat(count / sum(count)), fill = Pobre)) +
+  geom_bar() +
+  theme_minimal() +
+  scale_y_continuous(labels = scales::percent_format(), breaks = seq(0, 1, by = 0.05)) +  
+  scale_fill_manual(values = c("1" = "orange", "0"= "blue")) + 
+   labs(x = "", y = "%")  
+```
+
